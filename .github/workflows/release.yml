@@ -1,0 +1,96 @@
+# Builds the gateway for every supported platform and publishes a GitHub
+# Release. Triggered by pushing a version tag, or manually for a tag that
+# already exists.
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "要发布的 tag（必须已存在）"
+        required: true
+        type: string
+
+# The job only needs to create a release; nothing else in the repository.
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: "1.24"
+
+jobs:
+  release:
+    name: build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          # Release notes are generated from the commit history.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: true
+
+      - name: vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: build
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          version="${{ inputs.tag || github.ref_name }}"
+          commit="$(git rev-parse --short HEAD)"
+          date="$(git show -s --format=%cI HEAD)"
+          mkdir -p dist
+
+          # A static binary per platform. -trimpath keeps build paths out of
+          # the artifact so the same source produces the same bytes.
+          for target in \
+            linux/amd64 linux/arm64 \
+            darwin/amd64 darwin/arm64 \
+            windows/amd64; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            name="webvpn"
+            [ "$os" = "windows" ] && name="webvpn.exe"
+
+            echo "building $os/$arch"
+            GOOS="$os" GOARCH="$arch" go build \
+              -trimpath \
+              -ldflags "-s -w -X main.version=${version} -X main.commit=${commit} -X main.buildDate=${date}" \
+              -o "dist/$name" ./cmd/webvpn
+
+            base="webvpn_${version}_${os}_${arch}"
+            if [ "$os" = "windows" ]; then
+              (cd dist && zip -q "${base}.zip" "$name" && rm "$name")
+            else
+              (cd dist && tar -czf "${base}.tar.gz" "$name" && rm "$name")
+            fi
+          done
+
+          (cd dist && sha256sum * > SHA256SUMS)
+          ls -l dist
+
+      - name: publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/* --clobber
+          else
+            gh release create "$tag" dist/* \
+              --title "$tag" \
+              --generate-notes \
+              --verify-tag
+          fi
