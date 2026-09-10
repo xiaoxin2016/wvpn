@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -22,6 +23,13 @@ import (
 	"github.com/xiaoxin2016/wvpn/internal/auth"
 	"github.com/xiaoxin2016/wvpn/internal/store"
 	"github.com/xiaoxin2016/wvpn/internal/webvpn"
+)
+
+// Build information, injected with -ldflags by the release workflow.
+var (
+	version   = "dev"
+	commit    = "none"
+	buildDate = "unknown"
 )
 
 type config struct {
@@ -103,7 +111,13 @@ func main() {
 	flag.StringVar(&c.mailSubject, "mail-subject", "", "subject line of the code e-mail")
 
 	flag.BoolVar(&c.trustForwarded, "trust-forwarded-for", false, "read the client IP from X-Forwarded-For (only behind your own proxy)")
+	showVersion := flag.Bool("version", false, "print build information and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("webvpn %s (commit %s, built %s, %s)\n", version, commit, buildDate, runtime.Version())
+		return
+	}
 
 	if v := os.Getenv("WEBVPN_SMTP_PASS"); v != "" {
 		c.smtpPass = v
@@ -193,7 +207,7 @@ func run(c config, logger *log.Logger) error {
 	if serveTLS {
 		scheme = "https"
 	}
-	logger.Printf("listening on %s://%s (url-mode=%s)", scheme, ln.Addr(), codec.Name())
+	logger.Printf("webvpn %s listening on %s://%s (url-mode=%s)", version, scheme, ln.Addr(), codec.Name())
 
 	errc := make(chan error, 1)
 	go func() {

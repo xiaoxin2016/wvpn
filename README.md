@@ -178,6 +178,7 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 ## 代码结构
 
 ```
+.github/workflows/release.yml  打 tag 后交叉编译并发布 Release
 cmd/webvpn/main.go          命令行、装配、优雅退出
 internal/store/store.go     持久化配置：登录策略、访问策略、书签（管理后台唯一写入点）
 internal/webvpn/codec.go    三种 URL 编解码（plain / wrd / subdomain）
@@ -190,6 +191,25 @@ internal/auth/manager.go    验证码、会话、登录与管理接口
 internal/auth/mailer.go     SMTP / 控制台投递
 internal/auth/assets/       登录页与管理后台模板
 ```
+
+## 构建与发布
+
+```bash
+go build -o webvpn ./cmd/webvpn
+./webvpn -version          # webvpn dev (commit none, built unknown, go1.24.x)
+```
+
+打版本时推一个 `v` 开头的 tag，GitHub Actions（`.github/workflows/release.yml`）会跑
+`go vet` 与全量测试，再交叉编译 linux/darwin/windows 各架构的静态二进制并发布 Release：
+
+```bash
+git tag -a v0.1.0 -m "v0.1.0"
+git push origin v0.1.0
+```
+
+产物为 `webvpn_<tag>_<os>_<arch>.tar.gz`（Windows 为 `.zip`）以及 `SHA256SUMS`，
+版本号、commit 与构建时间通过 `-ldflags` 注入，可用 `-version` 查看。
+也可以在 Actions 页面手动触发该工作流并指定一个已存在的 tag（用于补发）。
 
 ## 测试
 
