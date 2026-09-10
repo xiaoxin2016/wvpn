@@ -10,8 +10,13 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "要发布的 tag（必须已存在）"
+        description: "版本号 tag，例如 v0.1.0"
         required: true
+        type: string
+      ref:
+        description: "tag 尚不存在时，从这个分支或 commit 创建它"
+        required: false
+        default: main
         type: string
 
 # The job only needs to create a release; nothing else in the repository.
@@ -28,9 +33,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
-          # Release notes are generated from the commit history.
+          # A tag push builds that tag; a manual run builds the branch or
+          # commit it names, and tags it below.
+          ref: ${{ inputs.ref || github.ref }}
+          # Release notes and tag lookups need the history, not a shallow copy.
           fetch-depth: 0
+
+      # A manual run may name a tag that does not exist yet, which is how a
+      # release is cut from the Actions UI rather than from a workstation.
+      - name: resolve tag
+        id: tag
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.tag || github.ref_name }}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "tag ${tag} already exists"
+            git checkout --detach "refs/tags/${tag}"
+          else
+            echo "creating tag ${tag} at $(git rev-parse --short HEAD)"
+            git tag -a "${tag}" -m "${tag}"
+            git push origin "refs/tags/${tag}"
+          fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/setup-go@v5
         with:
@@ -47,7 +71,7 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           set -euo pipefail
-          version="${{ inputs.tag || github.ref_name }}"
+          version="${{ steps.tag.outputs.tag }}"
           commit="$(git rev-parse --short HEAD)"
           date="$(git show -s --format=%cI HEAD)"
           mkdir -p dist
@@ -85,7 +109,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          tag="${{ inputs.tag || github.ref_name }}"
+          tag="${{ steps.tag.outputs.tag }}"
           if gh release view "$tag" >/dev/null 2>&1; then
             gh release upload "$tag" dist/* --clobber
           else
