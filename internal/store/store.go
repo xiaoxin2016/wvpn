@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -36,7 +37,33 @@ type Config struct {
 	Access Access `json:"access"`
 	// Bookmarks are the grouped links shown on the portal.
 	Bookmarks []Group `json:"bookmarks"`
+	// SMTP is where verification codes are sent from. It overrides the
+	// command-line SMTP flags once an address is set.
+	SMTP SMTP `json:"smtp"`
 }
+
+// SMTP is the mail submission service used for verification codes.
+//
+// Password is stored as written, in the same 0600 JSON file as the rest of the
+// configuration: there is nowhere to put a key that would make encrypting it
+// meaningful on a single host. Give the gateway its own submission account or
+// an app password, not a mailbox that matters.
+type SMTP struct {
+	// Addr is host:port, e.g. smtp.example.com:587.
+	Addr string `json:"addr"`
+	// From is the envelope sender and the From: header.
+	From string `json:"from"`
+	// Username and Password enable AUTH when set.
+	Username string `json:"username"`
+	Password string `json:"password"`
+	// ImplicitTLS dials TLS directly (port 465) instead of STARTTLS (587).
+	ImplicitTLS bool `json:"implicit_tls"`
+	// InsecureSkipVerify disables certificate verification.
+	InsecureSkipVerify bool `json:"insecure_skip_verify"`
+}
+
+// Configured reports whether the console has a usable SMTP service.
+func (s SMTP) Configured() bool { return s.Addr != "" && s.From != "" }
 
 // Access modes.
 const (
@@ -140,6 +167,10 @@ func normalizeConfig(c Config) Config {
 		}
 	}
 	c.Bookmarks = groups
+
+	c.SMTP.Addr = strings.TrimSpace(c.SMTP.Addr)
+	c.SMTP.From = strings.TrimSpace(c.SMTP.From)
+	c.SMTP.Username = strings.TrimSpace(c.SMTP.Username)
 	return c
 }
 
@@ -175,6 +206,10 @@ func (c Config) clone() Config {
 		groups[i].Items = append([]Bookmark(nil), groups[i].Items...)
 	}
 	c.Bookmarks = groups
+
+	c.SMTP.Addr = strings.TrimSpace(c.SMTP.Addr)
+	c.SMTP.From = strings.TrimSpace(c.SMTP.From)
+	c.SMTP.Username = strings.TrimSpace(c.SMTP.Username)
 	return c
 }
 
@@ -216,6 +251,29 @@ func Validate(c Config) error {
 				return fmt.Errorf("书签 %q: %w", it.Name, err)
 			}
 		}
+	}
+	return validateSMTP(c.SMTP)
+}
+
+func validateSMTP(s SMTP) error {
+	if s.Addr == "" && s.From == "" && s.Username == "" && s.Password == "" {
+		return nil
+	}
+	if s.Addr == "" {
+		return fmt.Errorf("SMTP 服务器地址不能为空")
+	}
+	host, port, err := net.SplitHostPort(s.Addr)
+	if err != nil || host == "" || port == "" {
+		return fmt.Errorf("SMTP 服务器需要写成 host:port，例如 smtp.example.com:587")
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("SMTP 端口 %q 不合法", port)
+	}
+	if s.From == "" {
+		return fmt.Errorf("发件人地址不能为空")
+	}
+	if addr, err := mail.ParseAddress(s.From); err != nil || addr.Address != s.From {
+		return fmt.Errorf("发件人地址 %q 格式不正确", s.From)
 	}
 	return nil
 }

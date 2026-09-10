@@ -199,3 +199,37 @@ func TestSitePolicyOff(t *testing.T) {
 		t.Errorf("a disabled policy still voted: %v", got)
 	}
 }
+
+func TestSMTPValidation(t *testing.T) {
+	s := newStore(t, Config{})
+	bad := []struct {
+		name string
+		smtp SMTP
+	}{
+		{"no port", SMTP{Addr: "smtp.example.com", From: "a@b.com"}},
+		{"bad port", SMTP{Addr: "smtp.example.com:0", From: "a@b.com"}},
+		{"no from", SMTP{Addr: "smtp.example.com:587"}},
+		{"bad from", SMTP{Addr: "smtp.example.com:587", From: "not an address"}},
+		{"password without server", SMTP{Password: "x"}},
+	}
+	for _, tc := range bad {
+		if err := s.Set(Config{SMTP: tc.smtp}); err == nil {
+			t.Errorf("%s: accepted %+v", tc.name, tc.smtp)
+		}
+	}
+
+	good := SMTP{Addr: "smtp.example.com:587", From: "no-reply@example.com", Username: "u", Password: "p"}
+	if err := s.Set(Config{SMTP: good}); err != nil {
+		t.Fatalf("valid SMTP rejected: %v", err)
+	}
+	if !s.Get().SMTP.Configured() {
+		t.Error("Configured() = false for a complete service")
+	}
+	if (SMTP{Addr: "smtp.example.com:587"}).Configured() {
+		t.Error("Configured() = true without a sender")
+	}
+	// An empty section stays valid: it just means "use the command line".
+	if err := s.Set(Config{}); err != nil {
+		t.Errorf("empty SMTP section rejected: %v", err)
+	}
+}

@@ -2,6 +2,7 @@ package auth
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -10,11 +11,40 @@ import (
 	"net/smtp"
 	"strings"
 	"time"
+
+	"github.com/xiaoxin2016/wvpn/internal/store"
 )
 
 // Mailer delivers a one-time code to an address.
 type Mailer interface {
 	Send(to, subject, body string) error
+}
+
+// StoreMailer sends through the SMTP service configured in the admin console,
+// re-reading it on every send so a corrected setting takes effect immediately.
+// Fallback covers the case where the console has none — typically the service
+// given on the command line, or the console mailer during bootstrap.
+type StoreMailer struct {
+	Store    *store.Store
+	Fallback Mailer
+}
+
+func (m StoreMailer) Send(to, subject, body string) error {
+	cfg := m.Store.Get().SMTP
+	if !cfg.Configured() {
+		if m.Fallback == nil {
+			return errors.New("auth: 尚未配置邮件发送服务")
+		}
+		return m.Fallback.Send(to, subject, body)
+	}
+	return SMTPMailer{
+		Addr:               cfg.Addr,
+		From:               cfg.From,
+		Username:           cfg.Username,
+		Password:           cfg.Password,
+		ImplicitTLS:        cfg.ImplicitTLS,
+		InsecureSkipVerify: cfg.InsecureSkipVerify,
+	}.Send(to, subject, body)
 }
 
 // ConsoleMailer is what -ignore-email installs: codes go to the process log

@@ -61,6 +61,9 @@ type Options struct {
 	// AdminNotice is shown on the admin page's access section. The gateway uses
 	// it to spell out the command-line limits the console cannot widen.
 	AdminNotice string
+	// MailNotice is shown on the admin page's mail section, for when the
+	// command line overrides what the console configures.
+	MailNotice string
 
 	Logger *log.Logger
 	// Now is overridable for tests.
@@ -236,6 +239,7 @@ func (m *Manager) Routes(mux *http.ServeMux, hosts ...string) {
 		mux.HandleFunc("POST "+host+"/admin/api/config", m.requireAdminAPI(m.handleSetConfig))
 		mux.HandleFunc("GET "+host+"/admin/api/sessions", m.requireAdminAPI(m.handleListSessions))
 		mux.HandleFunc("POST "+host+"/admin/api/sessions/revoke", m.requireAdminAPI(m.handleRevokeSession))
+		mux.HandleFunc("POST "+host+"/admin/api/smtp/test", m.requireAdminAPI(m.handleTestMail))
 	}
 }
 
@@ -623,7 +627,11 @@ func (m *Manager) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	data := map[string]any{"Email": s.Email, "Notice": m.opts.AdminNotice}
+	data := map[string]any{
+		"Email":      s.Email,
+		"Notice":     m.opts.AdminNotice,
+		"MailNotice": m.opts.MailNotice,
+	}
 	if err := m.tmplAdmin.Execute(w, data); err != nil {
 		m.log.Printf("auth: rendering admin page: %v", err)
 	}
@@ -648,29 +656,125 @@ func (m *Manager) requireAdminAPI(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// adminConfig is the wire shape of /admin/api/config. It is deliberately not
+// store.Config: the SMTP password goes in through this struct but never comes
+// back out of it.
+type adminConfig struct {
+	DefaultDomain string        `json:"default_domain"`
+	AllowedUsers  []string      `json:"allowed_users"`
+	Admins        []string      `json:"admins"`
+	Access        store.Access  `json:"access"`
+	Bookmarks     []store.Group `json:"bookmarks"`
+	SMTP          adminSMTP     `json:"smtp"`
+}
+
+type adminSMTP struct {
+	Addr        string `json:"addr"`
+	From        string `json:"from"`
+	Username    string `json:"username"`
+	ImplicitTLS bool   `json:"implicit_tls"`
+	Insecure    bool   `json:"insecure_skip_verify"`
+	// Password is write-only. Empty means "keep the stored one", which is what
+	// lets the page save the section without ever holding the secret.
+	Password string `json:"password"`
+	// ClearPassword removes the stored password.
+	ClearPassword bool `json:"clear_password"`
+	// PasswordSet is read-only: whether a password is stored at all.
+	PasswordSet bool `json:"password_set"`
+}
+
+// viewOf builds the response shape, with the password reduced to a flag.
+func viewOf(c store.Config) adminConfig {
+	return adminConfig{
+		DefaultDomain: c.DefaultDomain,
+		AllowedUsers:  c.AllowedUsers,
+		Admins:        c.Admins,
+		Access:        c.Access,
+		Bookmarks:     c.Bookmarks,
+		SMTP: adminSMTP{
+			Addr:        c.SMTP.Addr,
+			From:        c.SMTP.From,
+			Username:    c.SMTP.Username,
+			ImplicitTLS: c.SMTP.ImplicitTLS,
+			Insecure:    c.SMTP.InsecureSkipVerify,
+			PasswordSet: c.SMTP.Password != "",
+		},
+	}
+}
+
+// merge folds a submitted configuration onto the stored one, carrying the
+// existing SMTP password over unless the request replaces or clears it.
+func merge(in adminConfig, current store.Config) store.Config {
+	out := store.Config{
+		DefaultDomain: in.DefaultDomain,
+		AllowedUsers:  in.AllowedUsers,
+		Admins:        in.Admins,
+		Access:        in.Access,
+		Bookmarks:     in.Bookmarks,
+		SMTP: store.SMTP{
+			Addr:               in.SMTP.Addr,
+			From:               in.SMTP.From,
+			Username:           in.SMTP.Username,
+			ImplicitTLS:        in.SMTP.ImplicitTLS,
+			InsecureSkipVerify: in.SMTP.Insecure,
+			Password:           in.SMTP.Password,
+		},
+	}
+	switch {
+	case in.SMTP.ClearPassword:
+		out.SMTP.Password = ""
+	case in.SMTP.Password == "":
+		out.SMTP.Password = current.SMTP.Password
+	}
+	return out
+}
+
 func (m *Manager) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": m.store.Get()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": viewOf(m.store.Get())})
 }
 
 func (m *Manager) handleSetConfig(w http.ResponseWriter, r *http.Request) {
-	var cfg store.Config
-	if err := decodeBody(r, &cfg); err != nil {
+	var in adminConfig
+	if err := decodeBody(r, &in); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求格式不正确"})
 		return
 	}
 	s, _ := m.SessionFor(r)
-	if s != nil && !store.MatchAny(store.CleanPatterns(cfg.Admins), s.Email) {
+	if s != nil && !store.MatchAny(store.CleanPatterns(in.Admins), s.Email) {
 		// Locking yourself out of the admin page is not a recoverable mistake
 		// through this UI.
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "管理员列表必须仍然包含你自己（" + s.Email + "）"})
 		return
 	}
-	if err := m.store.Set(cfg); err != nil {
+	if err := m.store.Set(merge(in, m.store.Get())); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
 	m.log.Printf("auth: configuration updated by %s", s.Email)
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": m.store.Get()})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "config": viewOf(m.store.Get())})
+}
+
+// handleTestMail sends a message through whatever path a verification code
+// would take. The recipient is always the signed-in administrator: a form that
+// mails an arbitrary address would turn the console into a relay.
+func (m *Manager) handleTestMail(w http.ResponseWriter, r *http.Request) {
+	s, _ := m.SessionFor(r)
+	if s == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "unauthenticated"})
+		return
+	}
+	if m.rateLimited(m.clientIP(r)) {
+		writeJSON(w, http.StatusTooManyRequests, map[string]any{"ok": false, "error": "请求过于频繁，请稍后再试"})
+		return
+	}
+	body := "这是一封测试邮件，说明网关的邮件发送配置可用。\n\nThis is a test message from your gateway."
+	if err := m.opts.Mailer.Send(s.Email, m.opts.MailSubject, body); err != nil {
+		m.log.Printf("auth: test mail to %s failed: %v", s.Email, err)
+		writeJSON(w, http.StatusBadGateway, map[string]any{"ok": false, "error": "发送失败：" + err.Error()})
+		return
+	}
+	m.log.Printf("auth: test mail sent to %s", s.Email)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "sent_to": s.Email})
 }
 
 func (m *Manager) handleListSessions(w http.ResponseWriter, r *http.Request) {
