@@ -1,0 +1,266 @@
+package webvpn
+
+import (
+	"compress/gzip"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"strings"
+	"testing"
+)
+
+// originServer is a stand-in for the site behind the gateway.
+func originServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "abc", Path: "/", Domain: "origin.test", Secure: true})
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		io.WriteString(w, `<html><head><title>o</title></head><body>`+
+			`<a href="/page2">two</a><img src="img/x.png"></body></html>`)
+	})
+
+	mux.HandleFunc("/gz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		w.Header().Set("Content-Encoding", "gzip")
+		zw := gzip.NewWriter(w)
+		defer zw.Close()
+		io.WriteString(zw, `<html><head></head><body><a href="/deep/link">x</a></body></html>`)
+	})
+
+	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/page2?q=1", http.StatusFound)
+	})
+
+	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		io.WriteString(w, "referer="+r.Header.Get("Referer")+"\n")
+		io.WriteString(w, "origin="+r.Header.Get("Origin")+"\n")
+		io.WriteString(w, "cookie="+r.Header.Get("Cookie")+"\n")
+		io.WriteString(w, "accept-encoding="+r.Header.Get("Accept-Encoding")+"\n")
+	})
+
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// gatewayFor wires a gateway that is allowed to reach the test origin.
+func gatewayFor(t *testing.T, opts Options) (*httptest.Server, *http.Client) {
+	t.Helper()
+	if opts.Guard == nil {
+		opts.Guard = &Guard{AllowPrivate: true}
+	}
+	gw := httptest.NewServer(New(opts))
+	t.Cleanup(gw.Close)
+	client := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	return gw, client
+}
+
+func get(t *testing.T, client *http.Client, url string, headers map[string]string) (*http.Response, string) {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp, string(body)
+}
+
+func originHost(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	u, err := url.Parse(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return u.Host
+}
+
+func TestProxyRewritesDocument(t *testing.T) {
+	origin := originServer(t)
+	gw, client := gatewayFor(t, Options{})
+	host := originHost(t, origin)
+
+	resp, body := get(t, client, gw.URL+"/p/http/"+host+"/", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	for _, want := range []string{
+		`href="/p/http/` + host + `/page2"`,
+		`src="/p/http/` + host + `/img/x.png"`,
+		`<script src="/_wv/shim.js">`,
+		`window.__WV__=`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("body missing %q\n---\n%s", want, body)
+		}
+	}
+
+	// The origin's cookie is re-scoped onto the gateway's path space, loses its
+	// Domain, and drops Secure because this gateway is plain HTTP.
+	sc := resp.Header.Get("Set-Cookie")
+	if !strings.Contains(sc, "Path=/p/http/"+host+"/") {
+		t.Errorf("cookie path not rewritten: %q", sc)
+	}
+	if strings.Contains(sc, "Domain=") || strings.Contains(sc, "Secure") {
+		t.Errorf("cookie kept Domain or Secure over plain HTTP: %q", sc)
+	}
+}
+
+func TestProxyRewritesGzippedBody(t *testing.T) {
+	origin := originServer(t)
+	gw, client := gatewayFor(t, Options{})
+	host := originHost(t, origin)
+
+	resp, body := get(t, client, gw.URL+"/p/http/"+host+"/gz", nil)
+	if resp.Header.Get("Content-Encoding") != "" {
+		t.Errorf("Content-Encoding survived rewriting: %q", resp.Header.Get("Content-Encoding"))
+	}
+	if !strings.Contains(body, `href="/p/http/`+host+`/deep/link"`) {
+		t.Errorf("gzipped body was not rewritten: %s", body)
+	}
+}
+
+func TestProxyRewritesRedirect(t *testing.T) {
+	origin := originServer(t)
+	gw, client := gatewayFor(t, Options{})
+	host := originHost(t, origin)
+
+	resp, _ := get(t, client, gw.URL+"/p/http/"+host+"/redirect", nil)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Location"), "/p/http/"+host+"/page2?q=1"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+}
+
+func TestProxyTranslatesRefererAndStripsSessionCookie(t *testing.T) {
+	origin := originServer(t)
+	gw, client := gatewayFor(t, Options{SessionCookie: "wvsid"})
+	host := originHost(t, origin)
+
+	_, body := get(t, client, gw.URL+"/p/http/"+host+"/echo", map[string]string{
+		"Referer": gw.URL + "/p/http/" + host + "/page1",
+		"Origin":  gw.URL,
+		"Cookie":  "wvsid=secret; app=keepme",
+	})
+
+	if !strings.Contains(body, "referer=http://"+host+"/page1") {
+		t.Errorf("Referer not translated:\n%s", body)
+	}
+	if !strings.Contains(body, "origin=http://"+host) {
+		t.Errorf("Origin not translated:\n%s", body)
+	}
+	if strings.Contains(body, "secret") {
+		t.Errorf("gateway session cookie leaked upstream:\n%s", body)
+	}
+	if !strings.Contains(body, "app=keepme") {
+		t.Errorf("origin cookie was dropped:\n%s", body)
+	}
+	if !strings.Contains(body, "accept-encoding=gzip") {
+		t.Errorf("upstream Accept-Encoding was not normalised:\n%s", body)
+	}
+}
+
+func TestProxyRefusesInternalTargetByDefault(t *testing.T) {
+	origin := originServer(t)
+	gw, client := gatewayFor(t, Options{Guard: &Guard{}})
+	host := originHost(t, origin)
+
+	resp, _ := get(t, client, gw.URL+"/p/http/"+host+"/", nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 for a loopback target", resp.StatusCode)
+	}
+}
+
+func TestGotoAndStrayRecovery(t *testing.T) {
+	origin := originServer(t)
+	gw, client := gatewayFor(t, Options{})
+	host := originHost(t, origin)
+
+	resp, _ := get(t, client, gw.URL+"/_wv/go?url="+url.QueryEscape("http://"+host+"/page2"), nil)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("goto status = %d", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Location"), "/p/http/"+host+"/page2"; got != want {
+		t.Errorf("goto Location = %q, want %q", got, want)
+	}
+
+	// A root-relative URL that escaped rewriting is recovered from the Referer.
+	resp, _ = get(t, client, gw.URL+"/late/xhr", map[string]string{
+		"Referer": gw.URL + "/p/http/" + host + "/dir/page",
+	})
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("stray status = %d", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Location"), "/p/http/"+host+"/late/xhr"; got != want {
+		t.Errorf("stray Location = %q, want %q", got, want)
+	}
+}
+
+func TestPortalRenders(t *testing.T) {
+	gw, client := gatewayFor(t, Options{Portal: Portal{
+		Name: "测试网关",
+		Categories: []Category{{
+			Name:  "常用",
+			Items: []Bookmark{{Name: "示例", URL: "https://example.com/a"}},
+		}},
+	}})
+	resp, body := get(t, client, gw.URL+"/", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	for _, want := range []string{"测试网关", "常用", `href="/p/https/example.com/a"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("portal missing %q", want)
+		}
+	}
+}
+
+func TestShimIsServed(t *testing.T) {
+	gw, client := gatewayFor(t, Options{})
+	resp, body := get(t, client, gw.URL+shimPath, nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, "__WV__") {
+		t.Errorf("shim body looks wrong: %.120s", body)
+	}
+}
+
+func TestSubdomainModeEndToEnd(t *testing.T) {
+	origin := originServer(t)
+	codec, err := NewHostCodec("gw.test", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, client := gatewayFor(t, Options{Codec: codec})
+	host := originHost(t, origin)
+
+	// The origin listens on 127.0.0.1:port, which the label form cannot express,
+	// so the plain fallback path is what a browser would follow. It must still
+	// be served on the gateway's own host.
+	resp, body := get(t, client, gw.URL+"/p/http/"+host+"/", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, `href="/p/http/`+host+`/page2"`) {
+		t.Errorf("fallback rewriting wrong:\n%s", body)
+	}
+}

@@ -1,0 +1,180 @@
+package webvpn
+
+import (
+	"net/url"
+	"testing"
+)
+
+func mustURL(t *testing.T, raw string) *url.URL {
+	t.Helper()
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parsing %q: %v", raw, err)
+	}
+	return u
+}
+
+func TestPlainCodecRoundTrip(t *testing.T) {
+	c := PlainCodec{}
+	cases := []struct {
+		target string
+		want   string
+	}{
+		{"https://example.com/", "/p/https/example.com/"},
+		{"https://example.com", "/p/https/example.com/"},
+		{"http://example.com:8080/a/b?c=d&e=f", "/p/http/example.com:8080/a/b?c=d&e=f"},
+		{"https://example.com/%E4%B8%AD%20%E6%96%87/x", "/p/https/example.com/%E4%B8%AD%20%E6%96%87/x"},
+		{"wss://example.com/socket", "/p/wss/example.com/socket"},
+		{"https://[2001:db8::1]:8443/x", "/p/https/[2001:db8::1]:8443/x"},
+	}
+	for _, tc := range cases {
+		u := mustURL(t, tc.target)
+		got := c.Encode(u)
+		if got != tc.want {
+			t.Errorf("Encode(%s) = %q, want %q", tc.target, got, tc.want)
+		}
+		ref := mustURL(t, "http://gw.local"+got)
+		back, err := c.Decode("gw.local", ref.EscapedPath(), ref.RawQuery)
+		if err != nil {
+			t.Fatalf("Decode(%q): %v", got, err)
+		}
+		if want := mustURL(t, tc.target); back.Scheme != want.Scheme || back.Host != want.Host ||
+			back.EscapedPath() != orSlash(want.EscapedPath()) || back.RawQuery != want.RawQuery {
+			t.Errorf("round trip of %s gave %s", tc.target, back)
+		}
+	}
+}
+
+func orSlash(p string) string {
+	if p == "" {
+		return "/"
+	}
+	return p
+}
+
+func TestPlainCodecRejects(t *testing.T) {
+	c := PlainCodec{}
+	for _, path := range []string{"/", "/p/", "/p/ftp/example.com/", "/p/https//x", "/other/https/x"} {
+		if _, err := c.Decode("gw", path, ""); err == nil {
+			t.Errorf("Decode(%q) unexpectedly succeeded", path)
+		}
+	}
+	if got := c.Encode(mustURL(t, "ftp://example.com/x")); got != "" {
+		t.Errorf("Encode(ftp) = %q, want empty", got)
+	}
+}
+
+func TestWRDCodecRoundTrip(t *testing.T) {
+	c, err := NewWRDCodec(DefaultWRDKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range []string{
+		"https://example.com/",
+		"http://intranet.corp:8080/a?b=c",
+		"https://a.b.c.example.com/deep/path",
+	} {
+		u := mustURL(t, target)
+		enc := c.Encode(u)
+		if !c.Match("gw", enc) {
+			t.Fatalf("Match(%q) = false", enc)
+		}
+		ref := mustURL(t, "http://gw.local"+enc)
+		back, err := c.Decode("gw.local", ref.EscapedPath(), ref.RawQuery)
+		if err != nil {
+			t.Fatalf("Decode(%q): %v", enc, err)
+		}
+		if back.Scheme != u.Scheme || back.Host != u.Host || back.RawQuery != u.RawQuery {
+			t.Errorf("round trip of %s gave %s", target, back)
+		}
+	}
+}
+
+func TestWRDCodecShape(t *testing.T) {
+	c, err := NewWRDCodec(DefaultWRDKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	enc := c.Encode(mustURL(t, "https://example.com/x"))
+	const ivHex = "77726476706e69737468656265737421" // hex("wrdvpnisthebest!")
+	want := "/https/" + ivHex
+	if len(enc) < len(want) || enc[:len(want)] != want {
+		t.Errorf("Encode = %q, want prefix %q", enc, want)
+	}
+	if got := c.Encode(mustURL(t, "http://example.com:8080/")); got[:len("/http-8080/")] != "/http-8080/" {
+		t.Errorf("port went missing: %q", got)
+	}
+}
+
+func TestWRDCodecWrongKeyFails(t *testing.T) {
+	good, _ := NewWRDCodec(DefaultWRDKey)
+	other, _ := NewWRDCodec("0123456789abcdef")
+	enc := good.Encode(mustURL(t, "https://example.com/x"))
+	if _, err := other.Decode("gw", enc, ""); err == nil {
+		t.Error("decoding with the wrong key unexpectedly succeeded")
+	}
+}
+
+func TestHostCodecRoundTrip(t *testing.T) {
+	c, err := NewHostCodec("webvpn.example.com", "8001", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		target string
+		want   string
+	}{
+		{"https://git-scm.com/docs", "http://git--scm-com-s.webvpn.example.com:8001/docs"},
+		{"http://oa.corp.local/index.jsp?a=1", "http://oa-corp-local.webvpn.example.com:8001/index.jsp?a=1"},
+	}
+	for _, tc := range cases {
+		got := c.Encode(mustURL(t, tc.target))
+		if got != tc.want {
+			t.Fatalf("Encode(%s) = %q, want %q", tc.target, got, tc.want)
+		}
+		ref := mustURL(t, got)
+		if !c.Match(ref.Host, ref.EscapedPath()) {
+			t.Fatalf("Match(%s) = false", got)
+		}
+		back, err := c.Decode(ref.Host, ref.EscapedPath(), ref.RawQuery)
+		if err != nil {
+			t.Fatalf("Decode(%q): %v", got, err)
+		}
+		if back.String() != tc.target {
+			t.Errorf("round trip of %s gave %s", tc.target, back)
+		}
+	}
+}
+
+func TestHostCodecFallsBackForPorts(t *testing.T) {
+	c, _ := NewHostCodec("webvpn.example.com", "", false)
+	got := c.Encode(mustURL(t, "http://intranet:8080/x"))
+	if got != "/p/http/intranet:8080/x" {
+		t.Errorf("Encode with port = %q, want the plain form", got)
+	}
+}
+
+func TestLabelRoundTrip(t *testing.T) {
+	for _, host := range []string{"example.com", "git-scm.com", "a--b.example.com", "x.y.z"} {
+		for _, tls := range []bool{false, true} {
+			label := encodeLabel(host, tls)
+			gotHost, gotTLS := decodeLabel(label)
+			if gotHost != host || gotTLS != tls {
+				t.Errorf("label round trip of (%q,%v) gave (%q,%v) via %q", host, tls, gotHost, gotTLS, label)
+			}
+		}
+	}
+}
+
+func TestParseUserInput(t *testing.T) {
+	u, err := ParseUserInput(" example.com/path ")
+	if err != nil || u.Scheme != "https" || u.Host != "example.com" || u.Path != "/path" {
+		t.Fatalf("ParseUserInput = %v, %v", u, err)
+	}
+	if _, err := ParseUserInput("ftp://example.com"); err == nil {
+		t.Error("ftp target unexpectedly accepted")
+	}
+	if _, err := ParseUserInput(""); err == nil {
+		t.Error("empty input unexpectedly accepted")
+	}
+}

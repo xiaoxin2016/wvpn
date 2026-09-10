@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>{{.Name}}</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f4f5f7; --card:#ffffff; --border:#e3e6ec; --line:#eef0f4;
+    --fg:#151a23; --muted:#6b7280; --faint:#9aa1ad;
+    --accent:#3b5bdb; --accent-fg:#ffffff; --accent-soft:#eef1fd;
+    --radius:14px; --shadow:0 1px 2px rgba(16,24,40,.04), 0 10px 28px -14px rgba(16,24,40,.16);
+    --hero-from:#3b5bdb; --hero-to:#5f3dc4;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0b0d12; --card:#141821; --border:#232a37; --line:#1c2230;
+      --fg:#e8eaf0; --muted:#9aa3b2; --faint:#6b7484;
+      --accent:#6b87f0; --accent-fg:#0b0d12; --accent-soft:#1a2133;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 18px 36px -20px rgba(0,0,0,.7);
+      --hero-from:#1e2a5a; --hero-to:#2c1f52;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+         "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", Roboto, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:inherit}
+  header{
+    background:linear-gradient(125deg, var(--hero-from), var(--hero-to));
+    color:#fff; padding:0 0 62px;
+  }
+  .bar{max-width:1040px; margin:0 auto; padding:15px 22px; display:flex; align-items:center; gap:12px}
+  .brand{display:flex; align-items:center; gap:9px; font-weight:600; font-size:15px; letter-spacing:-.01em}
+  .brand svg{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.7;
+             stroke-linecap:round;stroke-linejoin:round;opacity:.9}
+  .bar .spacer{flex:1}
+  .bar .who{font-size:13px; opacity:.82}
+  .bar a.btn{
+    font-size:13px; padding:5px 11px; border-radius:8px; text-decoration:none;
+    border:1px solid rgba(255,255,255,.28); color:#fff; transition:background .15s;
+  }
+  .bar a.btn:hover{background:rgba(255,255,255,.14)}
+  .hero{max-width:1040px; margin:0 auto; padding:26px 22px 0; text-align:center}
+  .hero h1{margin:0 0 6px; font-size:23px; font-weight:640; letter-spacing:-.02em}
+  .hero p{margin:0 0 22px; opacity:.8; font-size:13.5px}
+  form.jump{
+    display:flex; align-items:stretch; gap:0; max-width:720px; margin:0 auto;
+    background:var(--card); border-radius:12px; padding:5px;
+    box-shadow:0 12px 34px -14px rgba(0,0,0,.45);
+  }
+  form.jump select{
+    appearance:none; border:0; outline:0; cursor:pointer; font:inherit; font-size:14px;
+    color:var(--muted); background:transparent no-repeat right 10px center/9px 6px;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 9 6'%3E%3Cpath d='M1 1l3.5 3.5L8 1' fill='none' stroke='%239aa1ad' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+    padding:0 26px 0 14px; border-right:1px solid var(--line);
+  }
+  form.jump input{
+    flex:1 1 auto; min-width:0; border:0; outline:0; background:transparent;
+    color:var(--fg); font:inherit; padding:11px 14px;
+  }
+  form.jump button{
+    border:0; border-radius:9px; background:var(--accent); color:var(--accent-fg);
+    font:inherit; font-weight:600; padding:0 20px; cursor:pointer; transition:opacity .15s;
+  }
+  form.jump button:hover{opacity:.92}
+  main{max-width:1040px; margin:-42px auto 0; padding:0 22px 64px; display:grid; gap:18px}
+  section{background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+          box-shadow:var(--shadow); padding:20px 22px 22px}
+  .head{display:flex; align-items:baseline; gap:10px; margin-bottom:14px}
+  h2{margin:0; font-size:14.5px; font-weight:620}
+  .head .note{color:var(--faint); font-size:12.5px}
+  .head .spacer{flex:1}
+  .clear{background:none;border:0;color:var(--faint);font:inherit;font-size:12.5px;cursor:pointer}
+  .clear:hover{color:var(--accent)}
+  .grid{display:grid; gap:10px; grid-template-columns:repeat(auto-fill, minmax(228px, 1fr))}
+  .item{
+    position:relative; display:flex; align-items:center; gap:11px; padding:11px 12px; overflow:hidden;
+    border:1px solid var(--border); border-radius:11px; text-decoration:none;
+    transition:border-color .15s, transform .1s, box-shadow .15s; background:var(--card);
+  }
+  .item:hover{border-color:var(--accent); transform:translateY(-1px);
+              box-shadow:0 6px 18px -10px rgba(16,24,40,.35)}
+  .avatar{
+    flex:none; width:32px; height:32px; border-radius:9px; display:grid; place-items:center;
+    font-size:14px; font-weight:600; color:#fff; background:var(--accent);
+  }
+  .meta{display:flex; flex-direction:column; min-width:0; flex:1 1 auto; padding-right:18px}
+  .meta .t{font-size:13.5px; font-weight:560; white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .meta .u{font-size:12px; color:var(--faint); white-space:nowrap; overflow:hidden; text-overflow:ellipsis}
+  .del{
+    position:absolute; top:6px; right:6px; width:22px; height:22px; border-radius:6px;
+    border:0; background:transparent; color:var(--faint); cursor:pointer; font-size:14px;
+    line-height:1; opacity:0; transition:opacity .15s;
+  }
+  .item:hover .del{opacity:1}
+  .del:hover{background:var(--line); color:var(--fg)}
+  .empty{color:var(--faint); font-size:13px; padding:6px 2px 2px}
+  footer{max-width:1040px; margin:0 auto; padding:0 22px 40px; color:var(--faint); font-size:12px}
+  code{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:11.5px}
+</style>
+</head>
+<body data-mode="{{.URLMode}}">
+<header>
+  <div class="bar">
+    <span class="brand">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6.5v5c0 4.6 3.2 8.6 8 9.5 4.8-.9 8-4.9 8-9.5v-5L12 3Z"/></svg>
+      {{.Name}}
+    </span>
+    <span class="spacer"></span>
+    {{if .SignedIn}}<span class="who">{{.Email}}</span>{{end}}
+    {{if .Admin}}<a class="btn" href="/admin">访问控制</a>{{end}}
+    {{if .SignedIn}}<a class="btn" href="/logout">退出</a>{{end}}
+  </div>
+  <div class="hero">
+    <h1>访问内部站点</h1>
+    <p>输入地址即可通过网关访问，支持 http 与 https，可带端口。</p>
+    <form class="jump" action="/_wv/go" method="get" id="jump">
+      <select id="scheme" aria-label="协议">
+        <option value="https">https</option>
+        <option value="http">http</option>
+      </select>
+      <input id="addr" name="addr" type="text" autocomplete="off" autocapitalize="off"
+             spellcheck="false" placeholder="host.example.com[:端口]/path　（按 / 聚焦）">
+      <input type="hidden" name="url" id="url">
+      <button type="submit">访问</button>
+    </form>
+  </div>
+</header>
+
+<main>
+  <section id="recent-section" hidden>
+    <div class="head">
+      <h2>最近访问</h2>
+      <span class="note">仅保存在此浏览器</span>
+      <span class="spacer"></span>
+      <button class="clear" id="clear-recent">清空</button>
+    </div>
+    <div class="grid" id="recent"></div>
+  </section>
+
+  {{range .Categories}}
+  <section>
+    <div class="head"><h2>{{.Name}}</h2></div>
+    <div class="grid">
+      {{range .Items}}
+      <a class="item" href="{{.Href}}" data-name="{{.Name}}" data-url="{{.Target}}">
+        <span class="avatar" data-seed="{{.Name}}">{{.Icon}}</span>
+        <span class="meta">
+          <span class="t">{{.Name}}</span>
+          <span class="u">{{if .Note}}{{.Note}}{{else}}{{.URL}}{{end}}</span>
+        </span>
+      </a>
+      {{end}}
+    </div>
+  </section>
+  {{end}}
+</main>
+
+<footer>URL 编码模式：<code>{{.URLMode}}</code>。网关会改写页面中的链接，但部分强依赖自身域名的站点仍可能异常。</footer>
+
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const KEY = "wv.recent";
+  const MAX = 8;
+
+  const load = () => { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch(e){ return []; } };
+  const save = (v) => { try { localStorage.setItem(KEY, JSON.stringify(v.slice(0, MAX))); } catch(e){} };
+
+  function hue(s){ let h = 0; for (let i=0;i<s.length;i++) h = (h*31 + s.charCodeAt(i)) % 360; return h; }
+  function paint(el, seed){ el.style.background = "hsl(" + hue(seed) + " 58% 48%)"; }
+
+  function remember(url, name){
+    const list = load().filter(x => x.url !== url);
+    list.unshift({url: url, name: name || url, at: Date.now()});
+    save(list);
+  }
+
+  function renderRecent(){
+    const list = load();
+    const box = $("recent");
+    $("recent-section").hidden = list.length === 0;
+    box.innerHTML = "";
+    list.forEach(function(entry){
+      const a = document.createElement("a");
+      a.className = "item";
+      a.href = "/_wv/go?url=" + encodeURIComponent(entry.url);
+
+      const av = document.createElement("span");
+      av.className = "avatar";
+      const label = (entry.name || entry.url).replace(/^https?:\/\//, "");
+      av.textContent = label.charAt(0).toUpperCase();
+      paint(av, label);
+
+      const meta = document.createElement("span");
+      meta.className = "meta";
+      const t = document.createElement("span"); t.className = "t"; t.textContent = label;
+      const u = document.createElement("span"); u.className = "u"; u.textContent = entry.url;
+      meta.append(t, u);
+
+      const del = document.createElement("button");
+      del.className = "del"; del.type = "button"; del.title = "移除"; del.textContent = "×";
+      del.addEventListener("click", function(ev){
+        ev.preventDefault(); ev.stopPropagation();
+        save(load().filter(x => x.url !== entry.url));
+        renderRecent();
+      });
+
+      a.append(av, meta, del);
+      box.appendChild(a);
+    });
+  }
+
+  $("jump").addEventListener("submit", function(ev){
+    let raw = $("addr").value.trim();
+    if (!raw){ ev.preventDefault(); $("addr").focus(); return; }
+    const full = /^[a-z][a-z0-9+.\-]*:\/\//i.test(raw) ? raw : $("scheme").value + "://" + raw;
+    $("url").value = full;
+    $("addr").removeAttribute("name");
+    remember(full, full.replace(/^https?:\/\//, ""));
+  });
+
+  document.querySelectorAll(".item[data-url]").forEach(function(a){
+    const av = a.querySelector(".avatar");
+    if (av) paint(av, av.dataset.seed || a.dataset.url);
+    a.addEventListener("click", function(){
+      remember(a.dataset.url, a.dataset.name);
+    });
+  });
+
+  $("clear-recent").addEventListener("click", function(){ save([]); renderRecent(); });
+
+  document.addEventListener("keydown", function(e){
+    if (e.key === "/" && document.activeElement !== $("addr")){
+      e.preventDefault(); $("addr").focus();
+    }
+  });
+
+  renderRecent();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>登录</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f4f5f7; --bg-accent:#e6e9f5;
+    --card:#ffffff; --border:#e3e6ec; --line:#eef0f4;
+    --fg:#151a23; --muted:#6b7280; --faint:#9aa1ad;
+    --accent:#3b5bdb; --accent-fg:#ffffff; --accent-soft:#eef1fd;
+    --danger:#c0392f; --ok:#1d7a4c;
+    --radius:14px;
+    --shadow:0 1px 2px rgba(16,24,40,.04), 0 12px 32px -12px rgba(16,24,40,.18);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0b0d12; --bg-accent:#121722;
+      --card:#141821; --border:#232a37; --line:#1c2230;
+      --fg:#e8eaf0; --muted:#9aa3b2; --faint:#6b7484;
+      --accent:#6b87f0; --accent-fg:#0b0d12; --accent-soft:#1a2133;
+      --danger:#ef7a70; --ok:#5ac08a;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 20px 40px -20px rgba(0,0,0,.7);
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; display:grid; place-items:center; padding:24px;
+    background:
+      radial-gradient(1000px 600px at 12% -10%, var(--bg-accent), transparent 60%),
+      radial-gradient(900px 500px at 100% 110%, var(--bg-accent), transparent 55%),
+      var(--bg);
+    color:var(--fg);
+    font:15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+         "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", Roboto, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .card{
+    width:100%; max-width:392px; background:var(--card); border:1px solid var(--border);
+    border-radius:var(--radius); box-shadow:var(--shadow); padding:32px 28px 26px;
+  }
+  .mark{width:34px;height:34px;border-radius:10px;background:var(--accent-soft);
+        display:grid;place-items:center;margin-bottom:18px}
+  .mark svg{width:17px;height:17px;stroke:var(--accent);fill:none;stroke-width:1.8;
+            stroke-linecap:round;stroke-linejoin:round}
+  h1{margin:0 0 6px; font-size:20px; font-weight:650; letter-spacing:-.01em}
+  .sub{margin:0 0 22px; color:var(--muted); font-size:13.5px}
+  label{display:block; font-size:12.5px; font-weight:560; color:var(--muted); margin:0 0 7px}
+  .field{position:relative; display:flex; align-items:center;
+         border:1px solid var(--border); border-radius:10px; background:var(--card);
+         transition:border-color .15s, box-shadow .15s}
+  .field:focus-within{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+  .field input{
+    flex:1 1 auto; min-width:0; border:0; outline:0; background:transparent; color:var(--fg);
+    font:inherit; padding:11px 13px; border-radius:10px;
+  }
+  .field .suffix{padding:0 13px 0 0; color:var(--faint); font-size:13.5px; white-space:nowrap}
+  #code{letter-spacing:.34em; font-variant-numeric:tabular-nums; font-size:17px; text-align:center}
+  button.primary{
+    width:100%; margin-top:18px; padding:11px 14px; border:0; border-radius:10px;
+    background:var(--accent); color:var(--accent-fg); font:inherit; font-weight:600;
+    cursor:pointer; transition:opacity .15s, transform .05s;
+  }
+  button.primary:hover{opacity:.92}
+  button.primary:active{transform:translateY(1px)}
+  button.primary[disabled]{opacity:.55; cursor:not-allowed; transform:none}
+  .row{display:flex; align-items:center; justify-content:space-between; margin-top:14px}
+  .link{background:none;border:0;padding:0;font:inherit;color:var(--accent);
+        cursor:pointer;font-size:13px}
+  .link[disabled]{color:var(--faint); cursor:default}
+  .msg{margin-top:14px; font-size:13px; min-height:19px; color:var(--muted)}
+  .msg.err{color:var(--danger)}
+  .msg.ok{color:var(--ok)}
+  .hidden{display:none}
+  .sent{font-size:13px;color:var(--muted);margin:0 0 18px}
+  .sent b{color:var(--fg); font-weight:560}
+  .foot{margin-top:22px; padding-top:16px; border-top:1px solid var(--line);
+        color:var(--faint); font-size:12px; text-align:center}
+</style>
+</head>
+<body data-domain="{{.DefaultDomain}}" data-next="{{.Next}}">
+  <main class="card">
+    <div class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M12 3 4 6.5v5c0 4.6 3.2 8.6 8 9.5 4.8-.9 8-4.9 8-9.5v-5L12 3Z"/></svg>
+    </div>
+
+    <section id="step-email">
+      <h1>登录</h1>
+      <p class="sub">输入邮箱地址，我们会发送一次性验证码。</p>
+      <label for="email">邮箱</label>
+      <div class="field">
+        <input id="email" type="email" autocomplete="username" autocapitalize="off"
+               spellcheck="false" autofocus placeholder="you">
+        <span id="suffix" class="suffix hidden"></span>
+      </div>
+      <button class="primary" id="send">发送验证码</button>
+    </section>
+
+    <section id="step-code" class="hidden">
+      <h1>输入验证码</h1>
+      <p class="sent">验证码已发送至 <b id="sent-to"></b>，请查收。</p>
+      <label for="code">6 位验证码</label>
+      <div class="field">
+        <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6"
+               pattern="[0-9]*" placeholder="······">
+      </div>
+      <button class="primary" id="verify">登录</button>
+      <div class="row">
+        <button class="link" id="back" type="button">换个邮箱</button>
+        <button class="link" id="resend" type="button" disabled>重新发送</button>
+      </div>
+    </section>
+
+    <p class="msg" id="msg" role="status" aria-live="polite"></p>
+    <p class="foot">仅限授权账号使用</p>
+  </main>
+
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  const domain = document.body.dataset.domain || "";
+  const next = document.body.dataset.next || "/";
+  const msg = $("msg");
+  let email = "", timer = null;
+
+  if (domain) { $("suffix").textContent = "@" + domain; $("suffix").classList.remove("hidden"); }
+
+  function say(text, kind){ msg.textContent = text || ""; msg.className = "msg" + (kind ? " " + kind : ""); }
+
+  async function post(url, body){
+    const r = await fetch(url, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      credentials: "same-origin",
+      body: JSON.stringify(body)
+    });
+    let data = {};
+    try { data = await r.json(); } catch (e) {}
+    return {status: r.status, data};
+  }
+
+  function countdown(seconds){
+    const btn = $("resend");
+    clearInterval(timer);
+    let left = seconds;
+    const tick = () => {
+      if (left <= 0){ clearInterval(timer); btn.disabled = false; btn.textContent = "重新发送"; return; }
+      btn.disabled = true; btn.textContent = "重新发送 (" + left + "s)"; left--;
+    };
+    tick(); timer = setInterval(tick, 1000);
+  }
+
+  async function sendCode(){
+    const raw = $("email").value.trim();
+    if (!raw){ say("请输入邮箱地址", "err"); $("email").focus(); return; }
+    $("send").disabled = true; say("正在发送…");
+    const {status, data} = await post("/auth/code", {email: raw});
+    $("send").disabled = false;
+    if (status !== 200 || !data.ok){ say(data.error || "发送失败，请稍后再试", "err"); return; }
+    email = raw;
+    $("sent-to").textContent = raw.includes("@") || !domain ? raw : raw + "@" + domain;
+    $("step-email").classList.add("hidden");
+    $("step-code").classList.remove("hidden");
+    $("code").focus();
+    say("若该地址已获授权，验证码将在数秒内送达。");
+    countdown(data.resend_after || 60);
+  }
+
+  async function verify(){
+    const code = $("code").value.trim();
+    if (code.length < 4){ say("请输入收到的验证码", "err"); return; }
+    $("verify").disabled = true; say("正在验证…");
+    const {status, data} = await post("/auth/verify", {email: email, code: code, next: next});
+    $("verify").disabled = false;
+    if (status !== 200 || !data.ok){ say(data.error || "验证失败", "err"); $("code").select(); return; }
+    say("登录成功，正在跳转…", "ok");
+    location.href = data.redirect || "/";
+  }
+
+  $("send").addEventListener("click", sendCode);
+  $("verify").addEventListener("click", verify);
+  $("resend").addEventListener("click", sendCode);
+  $("back").addEventListener("click", function(){
+    clearInterval(timer);
+    $("step-code").classList.add("hidden");
+    $("step-email").classList.remove("hidden");
+    $("email").focus(); say("");
+  });
+  $("email").addEventListener("keydown", e => { if (e.key === "Enter") sendCode(); });
+  $("code").addEventListener("keydown", e => { if (e.key === "Enter") verify(); });
+  $("code").addEventListener("input", function(){
+    this.value = this.value.replace(/\D/g, "").slice(0, 6);
+    if (this.value.length === 6) verify();
+  });
+})();
+</script>
+</body>
+</html>
