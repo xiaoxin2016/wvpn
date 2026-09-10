@@ -13,98 +13,17 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/xiaoxin2016/wvpn/internal/store"
 )
 
-func TestGlobMatch(t *testing.T) {
-	cases := []struct {
-		pattern, email string
-		want           bool
-	}{
-		{"*", "a@b.com", true},
-		{"*@test.com", "alice@test.com", true},
-		{"*@test.com", "alice@other.com", false},
-		{"alice@*", "alice@test.com", true},
-		{"alice@test.com", "ALICE@TEST.COM", true},
-		{"a?ice@test.com", "alice@test.com", true},
-		{"a?ice@test.com", "alce@test.com", false},
-		{"*@*.test.com", "a@dev.test.com", true},
-		{"*@test.com", "alice@test.com.evil.net", false},
-		{"", "a@b.com", false},
-	}
-	for _, tc := range cases {
-		if got := MatchPattern(tc.pattern, tc.email); got != tc.want {
-			t.Errorf("MatchPattern(%q, %q) = %v, want %v", tc.pattern, tc.email, got, tc.want)
-		}
-	}
-}
-
-func newStore(t *testing.T, cfg Config) *Store {
+func newStore(t *testing.T, cfg store.Config) *store.Store {
 	t.Helper()
-	s, err := LoadStore(filepath.Join(t.TempDir(), "cfg.json"), cfg)
+	s, err := store.LoadStore(filepath.Join(t.TempDir(), "cfg.json"), cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return s
-}
-
-func TestStorePersistsAndReloads(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "cfg.json")
-	s, err := LoadStore(path, Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("defaults were not written out: %v", err)
-	}
-	if err := s.Set(Config{DefaultDomain: "corp.local", AllowedUsers: []string{"ops@corp.local"}, Admins: []string{"root@corp.local"}}); err != nil {
-		t.Fatal(err)
-	}
-	again, err := LoadStore(path, Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := again.Get()
-	if got.DefaultDomain != "corp.local" || len(got.AllowedUsers) != 1 || got.Admins[0] != "root@corp.local" {
-		t.Fatalf("reloaded config = %+v", got)
-	}
-	if !again.IsAdmin("root@corp.local") || !again.Allowed("root@corp.local") {
-		t.Error("admins should also be allowed to sign in")
-	}
-	if again.Allowed("nobody@corp.local") {
-		t.Error("unlisted account was allowed")
-	}
-}
-
-func TestStoreRejectsBadConfig(t *testing.T) {
-	s := newStore(t, Config{})
-	if err := s.Set(Config{DefaultDomain: "not a domain"}); err == nil {
-		t.Error("invalid domain accepted")
-	}
-	if err := s.Set(Config{AllowedUsers: []string{"a b@test.com"}}); err == nil {
-		t.Error("invalid pattern accepted")
-	}
-}
-
-func TestNormalizeEmail(t *testing.T) {
-	s := newStore(t, Config{DefaultDomain: "test.com"})
-	got, err := s.NormalizeEmail("  Alice ")
-	if err != nil || got != "alice@test.com" {
-		t.Fatalf("NormalizeEmail = %q, %v", got, err)
-	}
-	if _, err := s.NormalizeEmail("bob@other.com"); err != nil {
-		t.Fatalf("full address rejected: %v", err)
-	}
-	for _, bad := range []string{"", "a b@test.com", "no-at-sign@", "x@@y"} {
-		if _, err := s.NormalizeEmail(bad); err == nil {
-			t.Errorf("NormalizeEmail(%q) accepted", bad)
-		}
-	}
-
-	noDomain := newStore(t, Config{})
-	if _, err := noDomain.NormalizeEmail("alice"); err == nil {
-		t.Error("bare local part accepted without a default domain")
-	}
 }
 
 // captureMailer records what would have been sent.
@@ -117,7 +36,7 @@ func (m captureMailer) Send(to, subject, body string) error {
 
 var codeRe = regexp.MustCompile(`\b(\d{6})\b`)
 
-func newManager(t *testing.T, cfg Config) (*Manager, captureMailer) {
+func newManager(t *testing.T, cfg store.Config) (*Manager, captureMailer) {
 	t.Helper()
 	mailer := captureMailer{ch: make(chan [3]string, 4)}
 	m, err := New(Options{
@@ -166,7 +85,7 @@ func postJSON(t *testing.T, c *http.Client, url string, body any) (int, map[stri
 }
 
 func TestSignInFlow(t *testing.T) {
-	m, mailer := newManager(t, Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}})
+	m, mailer := newManager(t, store.Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}})
 	srv, client := newServer(t, m)
 
 	// Unauthenticated browsers are sent to the sign-in page.
@@ -228,7 +147,7 @@ func TestSignInFlow(t *testing.T) {
 }
 
 func TestUnlistedAccountGetsNoCode(t *testing.T) {
-	m, mailer := newManager(t, Config{DefaultDomain: "test.com", AllowedUsers: []string{"alice@test.com"}})
+	m, mailer := newManager(t, store.Config{DefaultDomain: "test.com", AllowedUsers: []string{"alice@test.com"}})
 	srv, client := newServer(t, m)
 
 	status, out := postJSON(t, client, srv.URL+"/auth/code", map[string]string{"email": "mallory"})
@@ -243,7 +162,7 @@ func TestUnlistedAccountGetsNoCode(t *testing.T) {
 }
 
 func TestResendIsThrottled(t *testing.T) {
-	m, mailer := newManager(t, Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}})
+	m, mailer := newManager(t, store.Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}})
 	srv, client := newServer(t, m)
 
 	postJSON(t, client, srv.URL+"/auth/code", map[string]string{"email": "alice"})
@@ -260,7 +179,7 @@ func TestResendIsThrottled(t *testing.T) {
 }
 
 func TestAdminAPI(t *testing.T) {
-	m, mailer := newManager(t, Config{
+	m, mailer := newManager(t, store.Config{
 		DefaultDomain: "test.com",
 		AllowedUsers:  []string{"*@test.com"},
 		Admins:        []string{"root@test.com"},
@@ -278,7 +197,7 @@ func TestAdminAPI(t *testing.T) {
 		t.Fatalf("admin page: %d", resp.StatusCode)
 	}
 
-	status, out := postJSON(t, client, srv.URL+"/admin/api/config", Config{
+	status, out := postJSON(t, client, srv.URL+"/admin/api/config", store.Config{
 		DefaultDomain: "corp.local",
 		AllowedUsers:  []string{"*@corp.local"},
 		Admins:        []string{"root@test.com"},
@@ -291,14 +210,14 @@ func TestAdminAPI(t *testing.T) {
 	}
 
 	// An admin cannot drop themselves from the admin list through the UI.
-	status, out = postJSON(t, client, srv.URL+"/admin/api/config", Config{Admins: []string{"someone@else.com"}})
+	status, out = postJSON(t, client, srv.URL+"/admin/api/config", store.Config{Admins: []string{"someone@else.com"}})
 	if status == http.StatusOK {
 		t.Errorf("self-lockout was allowed: %v", out)
 	}
 }
 
 func TestNonAdminIsRefused(t *testing.T) {
-	m, mailer := newManager(t, Config{
+	m, mailer := newManager(t, store.Config{
 		DefaultDomain: "test.com",
 		AllowedUsers:  []string{"*@test.com"},
 		Admins:        []string{"root@test.com"},
@@ -314,14 +233,14 @@ func TestNonAdminIsRefused(t *testing.T) {
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("admin page for a normal user: %d", resp.StatusCode)
 	}
-	status, _ := postJSON(t, client, srv.URL+"/admin/api/config", Config{})
+	status, _ := postJSON(t, client, srv.URL+"/admin/api/config", store.Config{})
 	if status != http.StatusForbidden {
 		t.Fatalf("admin API for a normal user: %d", status)
 	}
 }
 
 func TestCrossOriginPostIsRefused(t *testing.T) {
-	m, _ := newManager(t, Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}})
+	m, _ := newManager(t, store.Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}})
 	srv, client := newServer(t, m)
 
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/auth/code", strings.NewReader(`{"email":"alice"}`))
@@ -373,7 +292,7 @@ func (j *simpleJar) Cookies(_ *url.URL) []*http.Cookie { return j.cookies }
 func TestLoginRedirectAcrossHosts(t *testing.T) {
 	mailer := captureMailer{ch: make(chan [3]string, 1)}
 	m, err := New(Options{
-		Store:       newStore(t, Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}}),
+		Store:       newStore(t, store.Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}}),
 		Mailer:      mailer,
 		Logger:      log.New(os.Stderr, "test ", 0),
 		LoginOrigin: "http://gw.test:8080",
@@ -411,7 +330,7 @@ func TestLoginRedirectAcrossHosts(t *testing.T) {
 }
 
 func TestLoginPageRevealsNothing(t *testing.T) {
-	m, _ := newManager(t, Config{
+	m, _ := newManager(t, store.Config{
 		DefaultDomain: "internal-corp.example",
 		AllowedUsers:  []string{"*@internal-corp.example"},
 	})
@@ -442,5 +361,62 @@ func TestLoginPageRevealsNothing(t *testing.T) {
 	// Completing a bare user name still works, it is just never advertised.
 	if got, err := m.store.NormalizeEmail("alice"); err != nil || got != "alice@internal-corp.example" {
 		t.Fatalf("NormalizeEmail = %q, %v", got, err)
+	}
+}
+
+func TestAdminEditsAccessPolicyAndBookmarks(t *testing.T) {
+	m, mailer := newManager(t, store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+	})
+	srv, client := newServer(t, m)
+	signIn(t, client, srv, mailer, "root")
+
+	full := store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+		Access: store.Access{
+			Mode:  store.AccessDenylist,
+			Sites: []string{"blocked.test", "10.0.0.0/8"},
+		},
+		Bookmarks: []store.Group{{
+			Name:  "常用系统",
+			Items: []store.Bookmark{{Name: "OA", URL: "http://oa.corp.local/", Note: "办公"}},
+		}},
+	}
+	status, out := postJSON(t, client, srv.URL+"/admin/api/config", full)
+	if status != http.StatusOK || out["ok"] != true {
+		t.Fatalf("saving access + bookmarks: %d %v", status, out)
+	}
+
+	got := m.store.Get()
+	if got.Access.Mode != store.AccessDenylist || len(got.Access.Sites) != 2 {
+		t.Errorf("access policy not stored: %+v", got.Access)
+	}
+	if len(got.Bookmarks) != 1 || got.Bookmarks[0].Items[0].Name != "OA" {
+		t.Errorf("bookmarks not stored: %+v", got.Bookmarks)
+	}
+	// The policy is live: the proxy reads it through the same store.
+	if got := m.store.HostVerdict("blocked.test"); got != store.Deny {
+		t.Errorf("stored policy is not in force: %v", got)
+	}
+
+	// Invalid input is refused and leaves the stored policy alone.
+	bad := full
+	bad.Access = store.Access{Mode: store.AccessAllowlist, Sites: []string{"10.0.0.0/64"}}
+	status, out = postJSON(t, client, srv.URL+"/admin/api/config", bad)
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid CIDR accepted: %d %v", status, out)
+	}
+	if m.store.Get().Access.Mode != store.AccessDenylist {
+		t.Error("a rejected save changed the stored policy")
+	}
+
+	// An empty allowlist would lock everyone out of every site.
+	bad.Access = store.Access{Mode: store.AccessAllowlist}
+	if status, _ = postJSON(t, client, srv.URL+"/admin/api/config", bad); status != http.StatusBadRequest {
+		t.Errorf("empty allowlist accepted: %d", status)
 	}
 }

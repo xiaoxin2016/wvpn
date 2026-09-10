@@ -18,6 +18,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/xiaoxin2016/wvpn/internal/store"
 )
 
 // sessionCookie is deliberately anonymous: the sign-in surface should not name
@@ -26,7 +28,7 @@ const sessionCookie = "wvsid"
 
 // Options configures a Manager. Zero values fall back to the defaults below.
 type Options struct {
-	Store  *Store
+	Store  *store.Store
 	Mailer Mailer
 
 	MailSubject string
@@ -56,6 +58,9 @@ type Options struct {
 	// TrustForwardedFor makes rate limiting read X-Forwarded-For. Only enable
 	// it behind a reverse proxy you control.
 	TrustForwardedFor bool
+	// AdminNotice is shown on the admin page's access section. The gateway uses
+	// it to spell out the command-line limits the console cannot widen.
+	AdminNotice string
 
 	Logger *log.Logger
 	// Now is overridable for tests.
@@ -85,7 +90,7 @@ type codeState struct {
 // Manager owns sessions, pending codes and the HTTP surface for both.
 type Manager struct {
 	opts  Options
-	store *Store
+	store *store.Store
 	log   *log.Logger
 
 	mu       sync.Mutex
@@ -618,7 +623,8 @@ func (m *Manager) handleAdminPage(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	if err := m.tmplAdmin.Execute(w, map[string]any{"Email": s.Email}); err != nil {
+	data := map[string]any{"Email": s.Email, "Notice": m.opts.AdminNotice}
+	if err := m.tmplAdmin.Execute(w, data); err != nil {
 		m.log.Printf("auth: rendering admin page: %v", err)
 	}
 }
@@ -647,13 +653,13 @@ func (m *Manager) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *Manager) handleSetConfig(w http.ResponseWriter, r *http.Request) {
-	var cfg Config
+	var cfg store.Config
 	if err := decodeBody(r, &cfg); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "请求格式不正确"})
 		return
 	}
 	s, _ := m.SessionFor(r)
-	if s != nil && !matchAny(cleanPatterns(cfg.Admins), s.Email) {
+	if s != nil && !store.MatchAny(store.CleanPatterns(cfg.Admins), s.Email) {
 		// Locking yourself out of the admin page is not a recoverable mistake
 		// through this UI.
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "管理员列表必须仍然包含你自己（" + s.Email + "）"})

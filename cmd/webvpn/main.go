@@ -5,12 +5,14 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"time"
 
 	"github.com/xiaoxin2016/wvpn/internal/auth"
+	"github.com/xiaoxin2016/wvpn/internal/store"
 	"github.com/xiaoxin2016/wvpn/internal/webvpn"
 )
 
@@ -67,15 +70,15 @@ func main() {
 	flag.StringVar(&c.tlsCert, "tls-cert", "", "TLS certificate file; serves HTTPS when set together with -tls-key")
 	flag.StringVar(&c.tlsKey, "tls-key", "", "TLS private key file")
 	flag.StringVar(&c.portal, "name", "WebVPN", "name shown on the portal page (never on the sign-in page)")
-	flag.StringVar(&c.resource, "bookmarks", "", "JSON file with the portal's curated links")
+	flag.StringVar(&c.resource, "bookmarks", "", "JSON file of portal links, imported once on first run; afterwards the admin console owns them")
 
 	flag.StringVar(&c.urlMode, "url-mode", "plain", "target encoding: plain | wrd | subdomain")
 	flag.StringVar(&c.urlKey, "url-key", webvpn.DefaultWRDKey, "AES key for -url-mode wrd (16, 24 or 32 bytes)")
 	flag.StringVar(&c.baseDomain, "base-domain", "", "wildcard domain for -url-mode subdomain, e.g. webvpn.example.com")
 	flag.StringVar(&c.publicPort, "public-port", "", "port browsers reach the gateway on, for -url-mode subdomain")
 
-	flag.StringVar(&c.allowHosts, "allow", "", "comma-separated allowlist of target hosts (suffix match); empty means any")
-	flag.StringVar(&c.denyHosts, "deny", "", "comma-separated denylist of target hosts (suffix match)")
+	flag.StringVar(&c.allowHosts, "allow", "", "hard allowlist of target hosts (suffix match), applied on top of the console's site policy; empty means any")
+	flag.StringVar(&c.denyHosts, "deny", "", "hard denylist of target hosts (suffix match), applied on top of the console's site policy")
 	flag.BoolVar(&c.allowPrivate, "allow-private", false, "allow targets that resolve to loopback/private/link-local addresses")
 	flag.BoolVar(&c.insecureTLS, "insecure-tls", false, "skip certificate verification for upstream HTTPS")
 	flag.Int64Var(&c.maxRewrite, "max-rewrite-bytes", 8<<20, "largest response body that gets rewritten")
@@ -120,24 +123,38 @@ func run(c config, logger *log.Logger) error {
 		return err
 	}
 
+	// One JSON file holds everything an admin can change at runtime: who may
+	// sign in, which sites are reachable, and the portal's bookmarks.
+	cfg, err := store.LoadStore(c.configPath, store.Config{
+		DefaultDomain: c.defaultDomain,
+		AllowedUsers:  splitCSV(c.allowUsers),
+		Admins:        splitCSV(c.admins),
+	})
+	if err != nil {
+		return err
+	}
+	if err := seedBookmarks(cfg, c.resource, logger); err != nil {
+		return err
+	}
+
+	// The command-line lists stay the operator's hard boundary; the store is
+	// the layer the admin console edits. Both are consulted.
+	guard := webvpn.NewGuard(c.allowHosts, c.denyHosts, c.allowPrivate)
+	guard.Site = sitePolicy{cfg}
+
 	gateway := webvpn.New(webvpn.Options{
 		Codec:                 codec,
-		Guard:                 webvpn.NewGuard(c.allowHosts, c.denyHosts, c.allowPrivate),
+		Guard:                 guard,
 		MaxRewriteBytes:       c.maxRewrite,
 		DialTimeout:           c.dialTimeout,
 		ResponseHeaderTimeout: c.respTimeout,
 		InsecureTLS:           c.insecureTLS,
-		Portal:                webvpn.Portal{Name: c.portal},
-		Logger:                logger,
+		Portal: webvpn.Portal{
+			Name:      c.portal,
+			Bookmarks: func() []webvpn.Category { return categories(cfg) },
+		},
+		Logger: logger,
 	})
-
-	if c.resource != "" {
-		cats, err := webvpn.LoadCategories(c.resource)
-		if err != nil {
-			return err
-		}
-		gateway.SetCategories(cats)
-	}
 
 	mux := http.NewServeMux()
 	var handler http.Handler = gateway
@@ -145,7 +162,7 @@ func run(c config, logger *log.Logger) error {
 	if c.noAuth {
 		logger.Print("warning: -no-auth is set; anyone who can reach this port can use the gateway")
 	} else {
-		manager, err := buildAuth(c, serveTLS, logger)
+		manager, err := buildAuth(c, cfg, serveTLS, logger)
 		if err != nil {
 			return err
 		}
@@ -230,16 +247,7 @@ func gatewayHosts(c config) []string {
 	return hosts
 }
 
-func buildAuth(c config, serveTLS bool, logger *log.Logger) (*auth.Manager, error) {
-	store, err := auth.LoadStore(c.configPath, auth.Config{
-		DefaultDomain: c.defaultDomain,
-		AllowedUsers:  splitCSV(c.allowUsers),
-		Admins:        splitCSV(c.admins),
-	})
-	if err != nil {
-		return nil, err
-	}
-
+func buildAuth(c config, cfg *store.Store, serveTLS bool, logger *log.Logger) (*auth.Manager, error) {
 	var mailer auth.Mailer
 	switch {
 	case c.ignoreEmail:
@@ -283,7 +291,7 @@ func buildAuth(c config, serveTLS bool, logger *log.Logger) (*auth.Manager, erro
 	}
 
 	return auth.New(auth.Options{
-		Store:             store,
+		Store:             cfg,
 		Mailer:            mailer,
 		MailSubject:       c.mailSubject,
 		SessionTTL:        c.sessionTTL,
@@ -293,6 +301,7 @@ func buildAuth(c config, serveTLS bool, logger *log.Logger) (*auth.Manager, erro
 		LoginOrigin:       loginOrigin,
 		NextDomain:        nextDomain,
 		TrustForwardedFor: c.trustForwarded,
+		AdminNotice:       adminNotice(c),
 		Logger:            logger,
 	})
 }
@@ -331,4 +340,90 @@ func (i identity) User(r *http.Request) (string, bool, bool) {
 		return "", false, false
 	}
 	return s.Email, s.Admin, true
+}
+
+// sitePolicy adapts the configuration store to what the gateway's guard needs.
+// The two packages stay independent of each other; only this file knows both.
+type sitePolicy struct{ s *store.Store }
+
+func (p sitePolicy) RequiresMatch() bool { return p.s.RequiresMatch() }
+func (p sitePolicy) HasAddrRules() bool  { return p.s.HasAddrRules() }
+
+func (p sitePolicy) HostVerdict(host string) webvpn.Verdict {
+	return verdict(p.s.HostVerdict(host))
+}
+
+func (p sitePolicy) AddrVerdict(addr netip.Addr) webvpn.Verdict {
+	return verdict(p.s.AddrVerdict(addr))
+}
+
+func verdict(v store.Verdict) webvpn.Verdict {
+	switch v {
+	case store.Allow:
+		return webvpn.VerdictAllow
+	case store.Deny:
+		return webvpn.VerdictDeny
+	}
+	return webvpn.VerdictNeutral
+}
+
+// categories converts the stored bookmarks into the portal's own shape.
+func categories(s *store.Store) []webvpn.Category {
+	groups := s.Get().Bookmarks
+	out := make([]webvpn.Category, 0, len(groups))
+	for _, g := range groups {
+		items := make([]webvpn.Bookmark, 0, len(g.Items))
+		for _, it := range g.Items {
+			items = append(items, webvpn.Bookmark{Name: it.Name, URL: it.URL, Note: it.Note})
+		}
+		out = append(out, webvpn.Category{Name: g.Name, Items: items})
+	}
+	return out
+}
+
+// seedBookmarks imports a bookmark file the first time the gateway runs. After
+// that the admin console owns the list, and the file is ignored.
+func seedBookmarks(s *store.Store, path string, logger *log.Logger) error {
+	if path == "" {
+		return nil
+	}
+	if len(s.Get().Bookmarks) > 0 {
+		logger.Printf("bookmarks already configured; ignoring %s", path)
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var groups []store.Group
+	if err := json.Unmarshal(data, &groups); err != nil {
+		return fmt.Errorf("parsing %s: %w", path, err)
+	}
+	cfg := s.Get()
+	cfg.Bookmarks = groups
+	if err := s.Set(cfg); err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	logger.Printf("imported %d bookmark groups from %s", len(groups), path)
+	return nil
+}
+
+// adminNotice tells admins about the limits the console cannot widen, so a
+// puzzling "目标被网关策略拒绝" has an explanation on the page that seems to
+// control it.
+func adminNotice(c config) string {
+	var parts []string
+	if c.allowHosts != "" {
+		parts = append(parts, "仅允许 "+c.allowHosts)
+	}
+	if c.denyHosts != "" {
+		parts = append(parts, "禁止 "+c.denyHosts)
+	}
+	if !c.allowPrivate {
+		parts = append(parts, "拒绝环回与内网地址")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "启动参数已设定的硬性边界（本页无法放宽）：" + strings.Join(parts, "；") + "。"
 }

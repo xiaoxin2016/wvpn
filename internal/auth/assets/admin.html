@@ -34,7 +34,7 @@
     position:sticky; top:0; z-index:5; background:color-mix(in srgb, var(--bg) 88%, transparent);
     backdrop-filter:saturate(180%) blur(12px); border-bottom:1px solid var(--border);
   }
-  .bar{max-width:960px; margin:0 auto; padding:13px 22px; display:flex; align-items:center; gap:14px}
+  .bar{max-width:980px; margin:0 auto; padding:13px 22px; display:flex; align-items:center; gap:14px}
   .bar h1{margin:0; font-size:15px; font-weight:620; letter-spacing:-.01em}
   .bar .spacer{flex:1}
   .who{color:var(--muted); font-size:13px}
@@ -43,20 +43,25 @@
     border:1px solid var(--border); background:var(--card); color:var(--fg); text-decoration:none;
   }
   a.btn:hover, button.btn:hover{border-color:var(--accent); color:var(--accent)}
-  main{max-width:960px; margin:0 auto; padding:26px 22px 60px; display:grid; gap:20px}
+  main{max-width:980px; margin:0 auto; padding:26px 22px 60px; display:grid; gap:20px}
   section{background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
           box-shadow:var(--shadow); padding:22px}
   h2{margin:0 0 4px; font-size:15px; font-weight:620}
   .hint{margin:0 0 18px; color:var(--muted); font-size:13px}
+  .hint code{font-size:12px; background:var(--accent-soft); color:var(--accent);
+             padding:1px 5px; border-radius:5px}
   label{display:block; font-size:12.5px; font-weight:560; color:var(--muted); margin:0 0 7px}
   .grid{display:grid; gap:16px}
   @media(min-width:760px){ .grid.two{grid-template-columns:1fr 1fr} }
-  input[type=text], textarea{
+  input[type=text], textarea, select{
     width:100%; border:1px solid var(--border); border-radius:10px; background:var(--bg);
-    color:var(--fg); font:inherit; padding:10px 12px; outline:0; transition:border-color .15s, box-shadow .15s;
+    color:var(--fg); font:inherit; padding:10px 12px; outline:0;
+    transition:border-color .15s, box-shadow .15s;
   }
-  textarea{min-height:132px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px; line-height:1.7}
-  input:focus, textarea:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+  textarea{min-height:132px; resize:vertical}
+  textarea, .mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+                  font-size:13px; line-height:1.7}
+  input:focus, textarea:focus, select:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
   .sub{margin:6px 0 0; color:var(--faint); font-size:12px}
   .actions{display:flex; align-items:center; gap:12px; margin-top:18px}
   button.primary{
@@ -67,12 +72,53 @@
   button.primary[disabled]{opacity:.55; cursor:not-allowed}
   .msg{font-size:13px; color:var(--muted)}
   .msg.err{color:var(--danger)} .msg.ok{color:var(--ok)}
+
+  /* access mode picker */
+  .modes{display:grid; gap:10px; margin-bottom:18px}
+  @media(min-width:700px){ .modes{grid-template-columns:repeat(3, 1fr)} }
+  .mode{
+    display:block; border:1px solid var(--border); border-radius:11px; padding:12px 14px;
+    cursor:pointer; transition:border-color .15s, background .15s;
+  }
+  .mode:hover{border-color:var(--accent)}
+  .mode input{position:absolute; opacity:0; width:0; height:0}
+  .mode:has(input:checked){border-color:var(--accent); background:var(--accent-soft)}
+  /* the radio itself is visually hidden, so the card has to show focus */
+  .mode:has(input:focus-visible){border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+  .mode .t{font-size:13.5px; font-weight:600; display:block}
+  .mode .d{font-size:12px; color:var(--muted); display:block; margin-top:3px}
+  .mode:has(input:checked) .d{color:var(--accent)}
+  .notice{
+    margin:0 0 16px; padding:10px 12px; border-radius:10px; background:var(--accent-soft);
+    color:var(--accent); font-size:12.5px;
+  }
+
+  /* bookmark editor */
+  .group{border:1px solid var(--border); border-radius:12px; padding:14px; margin-bottom:12px}
+  .group-head{display:flex; gap:10px; align-items:center; margin-bottom:12px}
+  .group-head input{flex:1 1 auto; font-weight:600}
+  .rows{display:grid; gap:8px}
+  .row{display:grid; gap:8px; grid-template-columns:1fr; align-items:center}
+  @media(min-width:760px){ .row{grid-template-columns:1.1fr 1.7fr 1.1fr auto} }
+  .row input{padding:8px 11px; font-size:13.5px}
+  .icon{
+    flex:none; width:30px; height:30px; border-radius:8px; border:1px solid var(--border);
+    background:transparent; color:var(--faint); cursor:pointer; font-size:15px; line-height:1;
+  }
+  .icon:hover{background:var(--danger-soft); color:var(--danger); border-color:var(--danger-soft)}
+  .add{
+    margin-top:10px; background:none; border:1px dashed var(--border); color:var(--muted);
+    font:inherit; font-size:13px; padding:8px 12px; border-radius:10px; cursor:pointer;
+  }
+  .add:hover{border-color:var(--accent); color:var(--accent)}
+  .add.wide{width:100%}
+
   table{width:100%; border-collapse:collapse; font-size:13.5px}
   th{text-align:left; font-weight:560; color:var(--muted); font-size:12.5px;
      padding:0 10px 9px; border-bottom:1px solid var(--line)}
   td{padding:11px 10px; border-bottom:1px solid var(--line); vertical-align:top}
   tr:last-child td{border-bottom:0}
-  td.mono{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.5px; color:var(--muted)}
+  td.mono{color:var(--muted)}
   .tag{display:inline-block; font-size:11px; padding:2px 7px; border-radius:999px;
        background:var(--accent-soft); color:var(--accent); margin-left:6px}
   button.revoke{font:inherit; font-size:12.5px; padding:5px 10px; border-radius:8px;
@@ -82,7 +128,7 @@
   .wrap{overflow-x:auto}
 </style>
 </head>
-<body data-me="{{.Email}}">
+<body data-me="{{.Email}}" data-notice="{{.Notice}}">
 <header>
   <div class="bar">
     <h1>访问控制</h1>
@@ -101,7 +147,7 @@
       <div>
         <label for="domain">默认邮箱域</label>
         <input id="domain" type="text" placeholder="test.com" autocapitalize="off" spellcheck="false">
-        <p class="sub">留空则要求用户输入完整邮箱地址。</p>
+        <p class="sub">留空则要求用户输入完整邮箱地址。登录页不会显示该域。</p>
       </div>
       <div class="grid two">
         <div>
@@ -117,8 +163,43 @@
       </div>
     </div>
     <div class="actions">
-      <button class="primary" id="save">保存</button>
-      <span class="msg" id="cfg-msg" role="status" aria-live="polite"></span>
+      <button class="primary" id="save-login">保存</button>
+      <span class="msg" id="login-msg" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>访问策略</h2>
+    <p class="hint">控制<strong>普通用户</strong>可以通过网关访问哪些站点；管理员账号不受本策略限制。清单支持主机匹配式（<code>oa.corp.local</code>、<code>*.corp.local</code>）与网段（<code>10.0.0.0/8</code>），每行一条。</p>
+    <p class="notice" id="notice" hidden></p>
+
+    <div class="modes">
+      <label class="mode"><input type="radio" name="mode" value="off">
+        <span class="t">不限制</span><span class="d">仅受启动参数与内网防护约束</span></label>
+      <label class="mode"><input type="radio" name="mode" value="allowlist">
+        <span class="t">白名单</span><span class="d">仅允许访问清单内的站点</span></label>
+      <label class="mode"><input type="radio" name="mode" value="denylist">
+        <span class="t">黑名单</span><span class="d">禁止访问清单内的站点</span></label>
+    </div>
+
+    <label for="sites">站点清单</label>
+    <textarea id="sites" spellcheck="false" placeholder="oa.corp.local&#10;*.corp.local&#10;10.0.0.0/8"></textarea>
+    <p class="sub">主机匹配式对域名生效（填写域名时同时覆盖其子域）；网段对 DNS 解析出的真实地址生效，可拦下指向内网的域名。</p>
+
+    <div class="actions">
+      <button class="primary" id="save-access">保存</button>
+      <span class="msg" id="access-msg" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>门户书签</h2>
+    <p class="hint">门户首页展示的分组与链接。地址可省略协议，默认按 https 处理。</p>
+    <div id="groups"></div>
+    <button class="add wide" id="add-group" type="button">+ 添加分组</button>
+    <div class="actions">
+      <button class="primary" id="save-bookmarks">保存</button>
+      <span class="msg" id="bookmarks-msg" role="status" aria-live="polite"></span>
     </div>
   </section>
 
@@ -137,6 +218,12 @@
 (function(){
   const $ = (id) => document.getElementById(id);
   const me = document.body.dataset.me || "";
+  const notice = document.body.dataset.notice || "";
+  if (notice){ $("notice").textContent = notice; $("notice").hidden = false; }
+
+  // The API round-trips the whole configuration, so every section saves on top
+  // of the last known state instead of blanking the fields it does not show.
+  let cfg = {default_domain:"", allowed_users:[], admins:[], access:{mode:"off", sites:[]}, bookmarks:[]};
 
   const lines = (v) => v.split("\n").map(s => s.trim()).filter(Boolean);
   const fmt = (iso) => { const d = new Date(iso);
@@ -151,29 +238,117 @@
     return {status:r.status, data};
   }
 
-  async function loadConfig(){
-    const {data} = await api("/admin/api/config");
-    if (!data.ok) return;
-    $("domain").value  = data.config.default_domain || "";
-    $("allowed").value = (data.config.allowed_users || []).join("\n");
-    $("admins").value  = (data.config.admins || []).join("\n");
+  function apply(c){
+    cfg = Object.assign({default_domain:"", allowed_users:[], admins:[], access:{mode:"off", sites:[]}, bookmarks:[]}, c);
+    cfg.access = Object.assign({mode:"off", sites:[]}, cfg.access || {});
+    cfg.bookmarks = cfg.bookmarks || [];
+    $("domain").value  = cfg.default_domain || "";
+    $("allowed").value = (cfg.allowed_users || []).join("\n");
+    $("admins").value  = (cfg.admins || []).join("\n");
+    $("sites").value   = (cfg.access.sites || []).join("\n");
+    const radio = document.querySelector('input[name=mode][value="' + cfg.access.mode + '"]');
+    if (radio) radio.checked = true;
+    renderGroups();
   }
 
-  async function saveConfig(){
-    $("save").disabled = true; say($("cfg-msg"), "保存中…");
-    const {data} = await api("/admin/api/config", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({
-        default_domain: $("domain").value.trim(),
-        allowed_users: lines($("allowed").value),
-        admins: lines($("admins").value)
-      })
-    });
-    $("save").disabled = false;
-    if (!data.ok){ say($("cfg-msg"), data.error || "保存失败", "err"); return; }
-    say($("cfg-msg"), "已保存", "ok");
-    setTimeout(() => say($("cfg-msg"), ""), 2500);
+  async function loadConfig(){
+    const {data} = await api("/admin/api/config");
+    if (data.ok) apply(data.config);
   }
+
+  async function save(btn, msgEl, patch){
+    btn.disabled = true; say(msgEl, "保存中…");
+    const body = Object.assign({}, cfg, patch);
+    const {data} = await api("/admin/api/config", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body)
+    });
+    btn.disabled = false;
+    if (!data.ok){ say(msgEl, data.error || "保存失败", "err"); return; }
+    apply(data.config);
+    say(msgEl, "已保存", "ok");
+    setTimeout(() => say(msgEl, ""), 2500);
+  }
+
+  $("save-login").addEventListener("click", () => save($("save-login"), $("login-msg"), {
+    default_domain: $("domain").value.trim(),
+    allowed_users: lines($("allowed").value),
+    admins: lines($("admins").value)
+  }));
+
+  $("save-access").addEventListener("click", () => {
+    const mode = (document.querySelector("input[name=mode]:checked") || {}).value || "off";
+    save($("save-access"), $("access-msg"), {access: {mode: mode, sites: lines($("sites").value)}});
+  });
+
+  // ---- bookmark editor ----------------------------------------------------
+
+  function field(value, placeholder, onInput){
+    const el = document.createElement("input");
+    el.type = "text"; el.value = value || ""; el.placeholder = placeholder;
+    el.spellcheck = false; el.autocapitalize = "off";
+    el.addEventListener("input", () => onInput(el.value));
+    return el;
+  }
+
+  function iconButton(title, onClick){
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "icon"; b.title = title; b.textContent = "×";
+    b.addEventListener("click", onClick);
+    return b;
+  }
+
+  function renderGroups(){
+    const box = $("groups");
+    box.innerHTML = "";
+    cfg.bookmarks.forEach(function(group, gi){
+      const wrap = document.createElement("div");
+      wrap.className = "group";
+
+      const head = document.createElement("div");
+      head.className = "group-head";
+      head.appendChild(field(group.name, "分组名称，如：常用系统", v => group.name = v));
+      head.appendChild(iconButton("删除分组", () => { cfg.bookmarks.splice(gi, 1); renderGroups(); }));
+      wrap.appendChild(head);
+
+      const rows = document.createElement("div");
+      rows.className = "rows";
+      (group.items || []).forEach(function(item, ii){
+        const row = document.createElement("div");
+        row.className = "row";
+        row.appendChild(field(item.name, "名称", v => item.name = v));
+        row.appendChild(field(item.url, "oa.corp.local/path", v => item.url = v));
+        row.appendChild(field(item.note, "备注（可选）", v => item.note = v));
+        row.appendChild(iconButton("删除书签", () => { group.items.splice(ii, 1); renderGroups(); }));
+        rows.appendChild(row);
+      });
+      wrap.appendChild(rows);
+
+      const add = document.createElement("button");
+      add.type = "button"; add.className = "add"; add.textContent = "+ 添加书签";
+      add.addEventListener("click", function(){
+        group.items = group.items || [];
+        group.items.push({name:"", url:"", note:""});
+        renderGroups();
+      });
+      wrap.appendChild(add);
+      box.appendChild(wrap);
+    });
+  }
+
+  $("add-group").addEventListener("click", function(){
+    cfg.bookmarks.push({name:"", items:[{name:"", url:"", note:""}]});
+    renderGroups();
+  });
+
+  $("save-bookmarks").addEventListener("click", function(){
+    // Drop the half-filled rows the editor leaves behind before saving.
+    const groups = cfg.bookmarks.map(function(g){
+      return {name: (g.name||"").trim(), items: (g.items||[]).filter(i => (i.name||"").trim() && (i.url||"").trim())};
+    }).filter(g => g.name && g.items.length);
+    save($("save-bookmarks"), $("bookmarks-msg"), {bookmarks: groups});
+  });
+
+  // ---- sessions -----------------------------------------------------------
 
   async function loadSessions(){
     const {data} = await api("/admin/api/sessions");
@@ -197,8 +372,7 @@
       btn.addEventListener("click", async () => {
         btn.disabled = true;
         await api("/admin/api/sessions/revoke", {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({id: s.id})
+          method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({id: s.id})
         });
         loadSessions();
       });
@@ -208,7 +382,6 @@
     }
   }
 
-  $("save").addEventListener("click", saveConfig);
   loadConfig(); loadSessions();
   setInterval(loadSessions, 30000);
 })();
