@@ -51,6 +51,9 @@ jobs:
             git checkout --detach "refs/tags/${tag}"
           else
             echo "creating tag ${tag} at $(git rev-parse --short HEAD)"
+            # An annotated tag needs a committer; the runner has none by default.
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git tag -a "${tag}" -m "${tag}"
             git push origin "refs/tags/${tag}"
           fi
