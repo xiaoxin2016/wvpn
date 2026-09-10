@@ -24,7 +24,11 @@
   `sendBeacon`、`window.open`、`setAttribute`、元素 `src/href` 属性写入、`history.pushState/replaceState`，
   以及针对 `innerHTML` 生成节点的 `MutationObserver` 兜底。
 - **邮箱验证码登录**：可配置默认域（只填前缀自动补全），会话保存在内存中，滑动续期。
-- **管理后台**：`/admin` 配置默认邮箱域、允许登录账号（支持 `*` / `?` 通配）、管理员列表，并查看/注销活动会话。
+- **管理后台**（`/admin`，改动立即生效，无需重启）：
+  - 登录策略：默认邮箱域、允许登录账号（`*` / `?` 通配）、管理员列表；
+  - 访问策略：不限制 / 白名单 / 黑名单三选一，配合站点清单使用（仅约束普通用户，管理员豁免）；
+  - 门户书签：分组与链接的可视化增删改；
+  - 活动会话：查看与强制注销。
 - **SSRF 防护**：默认拒绝环回、RFC1918、链路本地、CGNAT、组播地址，且在 `net.Dialer.Control`
   中对**实际解析结果**再校验一次，因此 DNS 重绑定（DNS rebinding）同样被拦下。
 
@@ -42,7 +46,7 @@
 
 ![门户](docs/screenshots/portal.png)
 
-管理后台：默认邮箱域、允许登录账号（通配符）、管理员列表，以及活动会话的查看与注销。
+管理后台：登录策略、访问策略（黑白名单 + 站点清单）、门户书签编辑、活动会话。
 
 ![管理后台](docs/screenshots/admin.png)
 
@@ -82,7 +86,7 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 | `-url-mode` | `plain` | `plain` / `wrd` / `subdomain` |
 | `-url-key` | 见下文 | `wrd` 模式的 AES 密钥（16/24/32 字节） |
 | `-base-domain` / `-public-port` | — | `subdomain` 模式的泛域名与对外端口 |
-| `-allow` / `-deny` | — | 目标主机白/黑名单，逗号分隔，按域名后缀匹配 |
+| `-allow` / `-deny` | — | 目标主机白/黑名单，逗号分隔，按域名后缀匹配。这是**硬性边界**，管理后台无法放宽 |
 | `-allow-private` | `false` | 允许访问环回/RFC1918/CGNAT 地址（内网网关通常需要开启，见安全须知）。链路本地与组播地址始终拒绝 |
 | `-insecure-tls` | `false` | 不校验上游证书 |
 | `-max-rewrite-bytes` | `8MiB` | 超过此大小的响应体不改写，直接透传 |
@@ -93,10 +97,11 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 | `-ignore-email` | `false` | **把验证码打印到控制台**，不发邮件 |
 | `-smtp-addr` / `-smtp-user` / `-smtp-pass` / `-smtp-from` | — | SMTP 提交服务；密码优先取环境变量 `WEBVPN_SMTP_PASS` |
 | `-smtp-implicit-tls` | `false` | 直接 TLS（465）而非 STARTTLS（587） |
-| `-name` / `-bookmarks` | `WebVPN` | 门户标题与常用链接文件 |
+| `-name` | `WebVPN` | 门户标题 |
+| `-bookmarks` | — | 书签 JSON 文件，仅在首次启动（策略文件中还没有书签时）导入一次，之后由管理后台接管 |
 | `-trust-forwarded-for` | `false` | 从 `X-Forwarded-For` 取客户端 IP（仅在自有反代之后开启） |
 
-`bookmarks.json` 的格式：
+`bookmarks.json` 的格式（仅用于首次导入，之后在管理后台里编辑）：
 
 ```json
 [
@@ -106,9 +111,37 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 ]
 ```
 
+## 访问策略
+
+管理后台的“访问策略”决定**普通用户**能通过网关访问哪些站点。它与启动参数是**两层**关系：
+`-allow` / `-deny` 是运维设定的硬性边界，后台策略只能在这个边界内进一步收紧。
+
+**管理员账号不受访问策略约束**——管理员可以随时改写这份清单，让它拦住自己没有意义。
+但启动参数的硬边界与内网地址防护对管理员同样生效：那是网关所在主机的边界，不是后台的设置项。
+换句话说，一个管理员账号等同于一张进入 `-allow` 范围内全网的通行证，请按特权账号管理。
+
+| 模式 | 行为 |
+| --- | --- |
+| 不限制 | 只受启动参数与内网防护约束 |
+| 白名单 | 仅允许访问站点清单命中的目标（清单不能为空） |
+| 黑名单 | 站点清单命中的目标一律拒绝 |
+
+站点清单每行一条，两种写法：
+
+- **主机匹配式**：`oa.corp.local`（不含通配符时同时覆盖其子域，如 `x.oa.corp.local`）、
+  `*.corp.local`、`git-*.corp.local`。在 DNS 解析之前按目标主机名匹配。
+- **网段**：`10.0.0.0/8`、`fd00::/8`。在**解析出真实地址之后**匹配，因此可以拦下
+  “域名看着人畜无害、实际指向内网”的情况，也可以用一条规则放行整个内网。
+
+两个阶段都会判定：主机名阶段命中即可给出结论；白名单模式下主机名没命中但清单里有网段时，
+判定推迟到连接前的地址阶段（因此错误可能表现为 502 而不是 403）。
+
+需要留意的固有限制：仅按名字拦截时，用户可以用 IP 直连或换一个指向同一站点的域名绕开黑名单。
+要真正封住一个网段，请写 CIDR 规则。
+
 ## 登录与权限
 
-- 登录页**不出现任何产品名称，也不显示已配置的默认邮箱域**（占位符固定为 `user@domain.com`），
+- 登录页标题只有“登录”，**不出现任何产品名称，也不显示已配置的默认邮箱域**（占位符固定为 `user@domain.com`），
   避免扫描者从登录页反推出组织的邮件域；错误信息统一，不区分“账号不存在”与“无权限”，
   避免账号枚举（user enumeration）。默认域只在服务端补全，只填前缀依然可以登录。
 - 验证码 6 位、内存中只存 SHA-256、默认 5 分钟过期、最多 5 次尝试、同一地址 60 秒内不重发，
@@ -116,6 +149,7 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 - 会话 Cookie 为 `HttpOnly` + `SameSite=Lax`，HTTPS 下自动加 `Secure`；
   **该 Cookie 在转发上游前会被剥离**，代理目标看不到网关会话。
 - 管理后台不允许把自己从管理员列表里删掉，防止自锁。
+- 管理员豁免访问策略（见上一节），因此“谁是管理员”本身就是一项访问控制决策。
 
 ## 安全须知（部署前请读完）
 
@@ -145,13 +179,13 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 
 ```
 cmd/webvpn/main.go          命令行、装配、优雅退出
+internal/store/store.go     持久化配置：登录策略、访问策略、书签（管理后台唯一写入点）
 internal/webvpn/codec.go    三种 URL 编解码（plain / wrd / subdomain）
 internal/webvpn/rewrite.go  HTML / CSS 改写（基于 x/net/html tokenizer，未改动的 token 原样透传）
 internal/webvpn/proxy.go    ReverseProxy 装配、请求/响应改写、Cookie 重定域
-internal/webvpn/guard.go    目标主机与地址策略（含 DialControl 反 DNS 重绑定）
+internal/webvpn/guard.go    目标策略：启动参数硬边界 + 后台站点清单 + 反 DNS 重绑定
 internal/webvpn/portal.go   门户页
 internal/webvpn/assets/     门户模板与运行期 shim.js
-internal/auth/store.go      策略持久化与通配符匹配
 internal/auth/manager.go    验证码、会话、登录与管理接口
 internal/auth/mailer.go     SMTP / 控制台投递
 internal/auth/assets/       登录页与管理后台模板
@@ -165,8 +199,10 @@ go test ./internal/webvpn -bench BenchmarkHTMLRewrite -run '^$'
 ```
 
 覆盖：三种 codec 的往返、HTML/CSS/srcset 改写与原样透传、`<base>` 语义、SSRF 判定、
-端到端代理（含 gzip、跳转、Cookie 重定域、Referer/Origin 翻译、会话 Cookie 剥离）、
-登录全流程（含错误码、单次使用、限流、越权与跨站 POST 拒绝）。
+访问策略（黑白名单在主机名与解析地址两个阶段的判定）、端到端代理（含 gzip、跳转、
+Cookie 重定域、Referer/Origin 翻译、会话 Cookie 剥离、站点清单拦截）、
+登录全流程（含错误码、单次使用、限流、越权与跨站 POST 拒绝）、
+登录页不泄露产品名与默认域、配置持久化与校验。
 
 ## 设计参考
 

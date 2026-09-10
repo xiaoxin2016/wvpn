@@ -264,3 +264,82 @@ func TestSubdomainModeEndToEnd(t *testing.T) {
 		t.Errorf("fallback rewriting wrong:\n%s", body)
 	}
 }
+
+func TestProxyEnforcesSitePolicy(t *testing.T) {
+	origin := originServer(t)
+	host := originHost(t, origin)
+	name, _, _ := strings.Cut(host, ":")
+
+	// Denylist: the target is refused before a connection is attempted.
+	denied, client := gatewayFor(t, Options{Guard: &Guard{
+		AllowPrivate: true,
+		Site:         fakeSite{hosts: map[string]Verdict{name: VerdictDeny}},
+	}})
+	resp, _ := get(t, client, denied.URL+"/p/http/"+host+"/", nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("denylisted target: %d, want 403", resp.StatusCode)
+	}
+
+	// Allowlist: an unlisted target is refused, a listed one still works.
+	gw, client := gatewayFor(t, Options{Guard: &Guard{
+		AllowPrivate: true,
+		Site:         fakeSite{allowlist: true, hosts: map[string]Verdict{name: VerdictAllow}},
+	}})
+	resp, body := get(t, client, gw.URL+"/p/http/"+host+"/", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("allowlisted target: %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, "/p/http/"+host+"/page2") {
+		t.Error("allowlisted target was not rewritten")
+	}
+	resp, _ = get(t, client, gw.URL+"/p/https/elsewhere.test/", nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unlisted target: %d, want 403", resp.StatusCode)
+	}
+}
+
+// fakeIdentity stands in for the auth layer.
+type fakeIdentity struct {
+	email string
+	admin bool
+}
+
+func (f fakeIdentity) User(*http.Request) (string, bool, bool) { return f.email, f.admin, true }
+
+func TestAdminBypassesSitePolicy(t *testing.T) {
+	origin := originServer(t)
+	host := originHost(t, origin)
+	name, _, _ := strings.Cut(host, ":")
+	site := fakeSite{hosts: map[string]Verdict{name: VerdictDeny}}
+
+	user, client := gatewayFor(t, Options{
+		Guard:    &Guard{AllowPrivate: true, Site: site},
+		Identity: fakeIdentity{email: "alice@test.com"},
+	})
+	resp, _ := get(t, client, user.URL+"/p/http/"+host+"/", nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("normal user reached a denylisted site: %d", resp.StatusCode)
+	}
+
+	admin, client := gatewayFor(t, Options{
+		Guard:    &Guard{AllowPrivate: true, Site: site},
+		Identity: fakeIdentity{email: "root@test.com", admin: true},
+	})
+	resp, body := get(t, client, admin.URL+"/p/http/"+host+"/", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin was blocked by the site policy: %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, "/p/http/"+host+"/page2") {
+		t.Error("admin request was not rewritten")
+	}
+
+	// The command-line boundary is not a console setting, so it still binds.
+	locked, client := gatewayFor(t, Options{
+		Guard:    &Guard{AllowPrivate: true, DenyHosts: []string{name}, Site: site},
+		Identity: fakeIdentity{email: "root@test.com", admin: true},
+	})
+	resp, _ = get(t, client, locked.URL+"/p/http/"+host+"/", nil)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("admin bypassed the command-line denylist: %d", resp.StatusCode)
+	}
+}

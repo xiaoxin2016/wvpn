@@ -3,11 +3,8 @@ package webvpn
 import (
 	"bytes"
 	"embed"
-	"encoding/json"
-	"fmt"
 	"html/template"
 	"net/http"
-	"os"
 	"time"
 )
 
@@ -35,28 +32,19 @@ type Category struct {
 type Portal struct {
 	// Name is shown in the header and the document title.
 	Name string
-	// Categories are optional curated links.
+	// Categories are curated links, used when Bookmarks is nil.
 	Categories []Category
+	// Bookmarks, when set, is consulted on every page load, so edits made in
+	// the admin console show up without a restart.
+	Bookmarks func() []Category
 }
 
-// LoadCategories reads a bookmark file: a JSON array of categories.
-func LoadCategories(path string) ([]Category, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+// categories returns the links to render.
+func (p Portal) categories() []Category {
+	if p.Bookmarks != nil {
+		return p.Bookmarks()
 	}
-	var cats []Category
-	if err := json.Unmarshal(data, &cats); err != nil {
-		return nil, fmt.Errorf("webvpn: parsing %s: %w", path, err)
-	}
-	for _, c := range cats {
-		for _, it := range c.Items {
-			if _, err := ParseUserInput(it.URL); err != nil {
-				return nil, fmt.Errorf("webvpn: %s: bookmark %q has an unusable URL %q", path, it.Name, it.URL)
-			}
-		}
-	}
-	return cats, nil
+	return p.Categories
 }
 
 type portalItem struct {
@@ -92,7 +80,7 @@ func (h *Handler) servePortal(w http.ResponseWriter, r *http.Request) {
 	if h.opts.Identity != nil {
 		data.Email, data.Admin, data.SignedIn = h.opts.Identity.User(r)
 	}
-	for _, c := range h.opts.Portal.Categories {
+	for _, c := range h.opts.Portal.categories() {
 		pc := portalCategory{Name: c.Name}
 		for _, it := range c.Items {
 			u, err := ParseUserInput(it.URL)
@@ -134,9 +122,6 @@ func serveShim(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "public, max-age=300")
 	http.ServeContent(w, r, "shim.js", shimModTime, bytes.NewReader(shimJS))
 }
-
-// SetCategories replaces the portal's curated links.
-func (h *Handler) SetCategories(cats []Category) { h.opts.Portal.Categories = cats }
 
 // SetIdentity attaches the identity layer. sessionCookie names the gateway's
 // own cookie, which is then stripped from every upstream request.

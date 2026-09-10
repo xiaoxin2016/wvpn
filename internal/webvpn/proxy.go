@@ -68,6 +68,8 @@ type ctxKey struct{}
 type reqInfo struct {
 	target *url.URL
 	secure bool
+	// site carries the name-phase site-policy result into the dial-time check.
+	site SiteCheck
 }
 
 func withInfo(ctx context.Context, info *reqInfo) context.Context {
@@ -77,6 +79,14 @@ func withInfo(ctx context.Context, info *reqInfo) context.Context {
 func infoFrom(ctx context.Context) *reqInfo {
 	info, _ := ctx.Value(ctxKey{}).(*reqInfo)
 	return info
+}
+
+// siteCheckFrom reports the name-phase site result carried by a request.
+func siteCheckFrom(ctx context.Context) SiteCheck {
+	if info := infoFrom(ctx); info != nil {
+		return info.site
+	}
+	return SiteCheck{}
 }
 
 const (
@@ -108,9 +118,9 @@ func New(opts Options) *Handler {
 	}
 
 	dialer := &net.Dialer{
-		Timeout:   opts.DialTimeout,
-		KeepAlive: 30 * time.Second,
-		Control:   opts.Guard.DialControl(),
+		Timeout:        opts.DialTimeout,
+		KeepAlive:      30 * time.Second,
+		ControlContext: opts.Guard.DialControl(siteCheckFrom),
 	}
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
@@ -180,7 +190,7 @@ func (h *Handler) serveGoto(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请输入合法的 http/https 地址", http.StatusBadRequest)
 		return
 	}
-	if err := h.opts.Guard.CheckHost(target.Host); err != nil {
+	if _, err := h.opts.Guard.CheckTarget(target.Host, h.siteExempt(r)); err != nil {
 		http.Error(w, "目标被网关策略拒绝: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -232,12 +242,25 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 		http.Error(w, "无法解析目标地址", http.StatusBadRequest)
 		return
 	}
-	if err := h.opts.Guard.CheckHost(target.Host); err != nil {
+	check, err := h.opts.Guard.CheckTarget(target.Host, h.siteExempt(r))
+	if err != nil {
 		http.Error(w, "目标被网关策略拒绝: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	info := &reqInfo{target: target, secure: isSecureRequest(r)}
+	info := &reqInfo{target: target, secure: isSecureRequest(r), site: check}
 	h.rp.ServeHTTP(w, r.WithContext(withInfo(r.Context(), info)))
+}
+
+// siteExempt reports whether this requester is exempt from the admin-editable
+// site policy. Administrators are: the console they control must not be able to
+// lock them out of the network they administer. The operator's own -allow/-deny
+// lists and the internal-address guard still apply to them.
+func (h *Handler) siteExempt(r *http.Request) bool {
+	if h.opts.Identity == nil {
+		return false
+	}
+	_, admin, ok := h.opts.Identity.User(r)
+	return ok && admin
 }
 
 func isSecureRequest(r *http.Request) bool {
