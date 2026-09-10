@@ -262,28 +262,9 @@ func gatewayHosts(c config) []string {
 }
 
 func buildAuth(c config, cfg *store.Store, serveTLS bool, logger *log.Logger) (*auth.Manager, error) {
-	var mailer auth.Mailer
-	switch {
-	case c.ignoreEmail:
-		mailer = auth.ConsoleMailer{Logger: logger}
-	case c.smtpAddr != "":
-		from := c.smtpFrom
-		if from == "" {
-			from = c.smtpUser
-		}
-		if from == "" {
-			return nil, errors.New("-smtp-from is required when sending mail")
-		}
-		mailer = auth.SMTPMailer{
-			Addr:               c.smtpAddr,
-			From:               from,
-			Username:           c.smtpUser,
-			Password:           c.smtpPass,
-			ImplicitTLS:        c.smtpImplicit,
-			InsecureSkipVerify: c.smtpInsecure,
-		}
-	default:
-		return nil, errors.New("no way to deliver codes: set -smtp-addr, or -ignore-email for local testing")
+	mailer, err := buildMailer(c, cfg, logger)
+	if err != nil {
+		return nil, err
 	}
 
 	cookieDomain, loginOrigin, nextDomain := "", "", ""
@@ -308,6 +289,7 @@ func buildAuth(c config, cfg *store.Store, serveTLS bool, logger *log.Logger) (*
 		Store:             cfg,
 		Mailer:            mailer,
 		MailSubject:       c.mailSubject,
+		MailNotice:        mailNotice(c, cfg),
 		SessionTTL:        c.sessionTTL,
 		CodeTTL:           c.codeTTL,
 		Secure:            serveTLS,
@@ -440,4 +422,50 @@ func adminNotice(c config) string {
 		return ""
 	}
 	return "启动参数已设定的硬性边界（本页无法放宽）：" + strings.Join(parts, "；") + "。"
+}
+
+// buildMailer picks how verification codes leave the process. The admin console
+// wins when it has a service configured; the command line is the fallback, and
+// -ignore-email overrides both so a developer never depends on real mail.
+func buildMailer(c config, cfg *store.Store, logger *log.Logger) (auth.Mailer, error) {
+	if c.ignoreEmail {
+		return auth.ConsoleMailer{Logger: logger}, nil
+	}
+
+	var fallback auth.Mailer
+	if c.smtpAddr != "" {
+		from := c.smtpFrom
+		if from == "" {
+			from = c.smtpUser
+		}
+		if from == "" {
+			return nil, errors.New("-smtp-from is required when sending mail")
+		}
+		fallback = auth.SMTPMailer{
+			Addr:               c.smtpAddr,
+			From:               from,
+			Username:           c.smtpUser,
+			Password:           c.smtpPass,
+			ImplicitTLS:        c.smtpImplicit,
+			InsecureSkipVerify: c.smtpInsecure,
+		}
+	}
+
+	if fallback == nil && !cfg.Get().SMTP.Configured() {
+		return nil, errors.New("no way to deliver codes: configure SMTP in the admin console " +
+			"(start once with -ignore-email to get in), pass -smtp-addr, or use -ignore-email for local testing")
+	}
+	return auth.StoreMailer{Store: cfg, Fallback: fallback}, nil
+}
+
+// mailNotice explains on the admin page when the command line overrides, or
+// stands in for, what the console configures.
+func mailNotice(c config, cfg *store.Store) string {
+	switch {
+	case c.ignoreEmail:
+		return "当前以 -ignore-email 启动：验证码只会打印到进程日志，本节配置不会生效。"
+	case c.smtpAddr != "" && !cfg.Get().SMTP.Configured():
+		return "当前使用启动参数 -smtp-addr 指定的服务（" + c.smtpAddr + "）；在此填写并保存后将改用本页配置。"
+	}
+	return ""
 }

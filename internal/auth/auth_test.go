@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -61,9 +62,13 @@ func newServer(t *testing.T, m *Manager) (*httptest.Server, *http.Client) {
 	})))
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	jar := &simpleJar{}
-	return srv, &http.Client{
-		Jar:           jar,
+	return srv, newClient()
+}
+
+// newClient is a browser with its own cookie jar.
+func newClient() *http.Client {
+	return &http.Client{
+		Jar:           &simpleJar{},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 }
@@ -418,5 +423,115 @@ func TestAdminEditsAccessPolicyAndBookmarks(t *testing.T) {
 	bad.Access = store.Access{Mode: store.AccessAllowlist}
 	if status, _ = postJSON(t, client, srv.URL+"/admin/api/config", bad); status != http.StatusBadRequest {
 		t.Errorf("empty allowlist accepted: %d", status)
+	}
+}
+
+func TestAdminSMTPConfig(t *testing.T) {
+	m, mailer := newManager(t, store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+	})
+	srv, client := newServer(t, m)
+	signIn(t, client, srv, mailer, "root")
+
+	base := map[string]any{
+		"default_domain": "test.com",
+		"allowed_users":  []string{"*@test.com"},
+		"admins":         []string{"root@test.com"},
+		"access":         map[string]any{"mode": "off", "sites": []string{}},
+		"bookmarks":      []any{},
+	}
+	post := func(smtp map[string]any) (int, map[string]any) {
+		body := map[string]any{}
+		for k, v := range base {
+			body[k] = v
+		}
+		body["smtp"] = smtp
+		return postJSON(t, client, srv.URL+"/admin/api/config", body)
+	}
+
+	status, out := post(map[string]any{
+		"addr": "smtp.example.com:587", "from": "no-reply@example.com",
+		"username": "gateway", "password": "s3cret",
+		"implicit_tls": false, "insecure_skip_verify": false,
+		"clear_password": false, "password_set": false,
+	})
+	if status != http.StatusOK || out["ok"] != true {
+		t.Fatalf("saving SMTP: %d %v", status, out)
+	}
+	if got := m.store.Get().SMTP.Password; got != "s3cret" {
+		t.Fatalf("stored password = %q", got)
+	}
+
+	// The password must not come back out, in this response or a later read.
+	if strings.Contains(fmt.Sprint(out), "s3cret") {
+		t.Error("save response echoed the password")
+	}
+	resp, err := client.Get(srv.URL + "/admin/api/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(raw), "s3cret") {
+		t.Errorf("GET /admin/api/config leaked the password: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"password_set":true`) {
+		t.Errorf("password_set missing from %s", raw)
+	}
+
+	// Saving with an empty password keeps the stored one.
+	if status, out = post(map[string]any{
+		"addr": "smtp.example.com:465", "from": "no-reply@example.com",
+		"username": "gateway", "password": "", "implicit_tls": true,
+		"insecure_skip_verify": false, "clear_password": false, "password_set": true,
+	}); status != http.StatusOK {
+		t.Fatalf("second save: %d %v", status, out)
+	}
+	got := m.store.Get().SMTP
+	if got.Password != "s3cret" || !got.ImplicitTLS || got.Addr != "smtp.example.com:465" {
+		t.Fatalf("merge lost or mangled fields: %+v", got)
+	}
+
+	// Clearing is explicit.
+	if status, out = post(map[string]any{
+		"addr": "smtp.example.com:465", "from": "no-reply@example.com",
+		"username": "gateway", "password": "", "implicit_tls": true,
+		"insecure_skip_verify": false, "clear_password": true, "password_set": true,
+	}); status != http.StatusOK {
+		t.Fatalf("clearing password: %d %v", status, out)
+	}
+	if got := m.store.Get().SMTP.Password; got != "" {
+		t.Errorf("password survived an explicit clear: %q", got)
+	}
+}
+
+func TestTestMailGoesOnlyToTheAdmin(t *testing.T) {
+	m, mailer := newManager(t, store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+	})
+	srv, client := newServer(t, m)
+	signIn(t, client, srv, mailer, "root")
+
+	status, out := postJSON(t, client, srv.URL+"/admin/api/smtp/test", map[string]any{})
+	if status != http.StatusOK || out["ok"] != true {
+		t.Fatalf("test mail: %d %v", status, out)
+	}
+	if out["sent_to"] != "root@test.com" {
+		t.Errorf("sent_to = %v", out["sent_to"])
+	}
+	sent := <-mailer.ch
+	if sent[0] != "root@test.com" {
+		t.Errorf("test mail went to %q; the endpoint must not accept a recipient", sent[0])
+	}
+
+	// A normal user cannot reach it at all.
+	other := newClient()
+	signIn(t, other, srv, mailer, "alice")
+	if status, _ = postJSON(t, other, srv.URL+"/admin/api/smtp/test", map[string]any{}); status != http.StatusForbidden {
+		t.Errorf("non-admin test mail: %d, want 403", status)
 	}
 }
