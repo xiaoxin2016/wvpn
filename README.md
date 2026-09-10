@@ -233,7 +233,8 @@ git push origin v0.1.0
 
 产物为 `webvpn_<tag>_<os>_<arch>.tar.gz`（Windows 为 `.zip`）以及 `SHA256SUMS`，
 版本号、commit 与构建时间通过 `-ldflags` 注入，可用 `-version` 查看。
-也可以在 Actions 页面手动触发该工作流并指定一个已存在的 tag（用于补发）。
+也可以在 Actions 页面手动触发该工作流：填入版本号，若该 tag 尚不存在，工作流会在指定分支
+（默认 `main`）上创建并推送它，再继续构建发布——不需要在本地推 tag。已存在的 tag 则直接补发。
 
 ## 测试
 
