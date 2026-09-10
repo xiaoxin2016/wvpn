@@ -59,7 +59,6 @@
     flex:1 1 auto; min-width:0; border:0; outline:0; background:transparent; color:var(--fg);
     font:inherit; padding:11px 13px; border-radius:10px;
   }
-  .field .suffix{padding:0 13px 0 0; color:var(--faint); font-size:13.5px; white-space:nowrap}
   #code{letter-spacing:.34em; font-variant-numeric:tabular-nums; font-size:17px; text-align:center}
   button.primary{
     width:100%; margin-top:18px; padding:11px 14px; border:0; border-radius:10px;
@@ -83,7 +82,7 @@
         color:var(--faint); font-size:12px; text-align:center}
 </style>
 </head>
-<body data-domain="{{.DefaultDomain}}" data-next="{{.Next}}">
+<body data-next="{{.Next}}">
   <main class="card">
     <div class="mark" aria-hidden="true">
       <svg viewBox="0 0 24 24"><path d="M12 3 4 6.5v5c0 4.6 3.2 8.6 8 9.5 4.8-.9 8-4.9 8-9.5v-5L12 3Z"/></svg>
@@ -95,8 +94,7 @@
       <label for="email">邮箱</label>
       <div class="field">
         <input id="email" type="email" autocomplete="username" autocapitalize="off"
-               spellcheck="false" autofocus placeholder="you">
-        <span id="suffix" class="suffix hidden"></span>
+               spellcheck="false" autofocus placeholder="user@domain.com">
       </div>
       <button class="primary" id="send">发送验证码</button>
     </section>
@@ -123,12 +121,9 @@
 <script>
 (function(){
   const $ = (id) => document.getElementById(id);
-  const domain = document.body.dataset.domain || "";
   const next = document.body.dataset.next || "/";
   const msg = $("msg");
   let email = "", timer = null;
-
-  if (domain) { $("suffix").textContent = "@" + domain; $("suffix").classList.remove("hidden"); }
 
   function say(text, kind){ msg.textContent = text || ""; msg.className = "msg" + (kind ? " " + kind : ""); }
 
@@ -163,7 +158,9 @@
     $("send").disabled = false;
     if (status !== 200 || !data.ok){ say(data.error || "发送失败，请稍后再试", "err"); return; }
     email = raw;
-    $("sent-to").textContent = raw.includes("@") || !domain ? raw : raw + "@" + domain;
+    // Echo only what was typed: the page must not reveal the domain the
+    // gateway completes bare user names with.
+    $("sent-to").textContent = raw.includes("@") ? raw : "你的邮箱";
     $("step-email").classList.add("hidden");
     $("step-code").classList.remove("hidden");
     $("code").focus();

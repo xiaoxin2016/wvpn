@@ -1,4 +1,4 @@
-// Command wvpn runs a WebVPN gateway: a browser signs in with an e-mail
+// Command webvpn runs a WebVPN gateway: a browser signs in with an e-mail
 // one-time code, then reaches http/https sites through this process, which
 // rewrites every response so the browser never talks to the origin directly.
 package main
@@ -66,7 +66,7 @@ func main() {
 	flag.StringVar(&c.addr, "addr", ":8080", "listen address")
 	flag.StringVar(&c.tlsCert, "tls-cert", "", "TLS certificate file; serves HTTPS when set together with -tls-key")
 	flag.StringVar(&c.tlsKey, "tls-key", "", "TLS private key file")
-	flag.StringVar(&c.portal, "name", "访问网关", "name shown on the portal page (never on the sign-in page)")
+	flag.StringVar(&c.portal, "name", "WebVPN", "name shown on the portal page (never on the sign-in page)")
 	flag.StringVar(&c.resource, "bookmarks", "", "JSON file with the portal's curated links")
 
 	flag.StringVar(&c.urlMode, "url-mode", "plain", "target encoding: plain | wrd | subdomain")
@@ -83,7 +83,7 @@ func main() {
 	flag.DurationVar(&c.respTimeout, "response-timeout", 30*time.Second, "upstream response header timeout")
 
 	flag.BoolVar(&c.noAuth, "no-auth", false, "disable sign-in entirely (development only)")
-	flag.StringVar(&c.configPath, "config", "wvpn-config.json", "file holding the admin-editable access policy")
+	flag.StringVar(&c.configPath, "config", "webvpn-config.json", "file holding the admin-editable access policy")
 	flag.StringVar(&c.defaultDomain, "default-domain", "", "initial default e-mail domain, e.g. test.com")
 	flag.StringVar(&c.allowUsers, "allow-user", "", "initial comma-separated allowlist of accounts, e.g. \"*@test.com\"")
 	flag.StringVar(&c.admins, "admin", "", "initial comma-separated admin accounts")
@@ -93,7 +93,7 @@ func main() {
 	flag.BoolVar(&c.ignoreEmail, "ignore-email", false, "print verification codes to the console instead of mailing them")
 	flag.StringVar(&c.smtpAddr, "smtp-addr", "", "SMTP submission service, host:port")
 	flag.StringVar(&c.smtpUser, "smtp-user", "", "SMTP username")
-	flag.StringVar(&c.smtpPass, "smtp-pass", "", "SMTP password; prefer WVPN_SMTP_PASS")
+	flag.StringVar(&c.smtpPass, "smtp-pass", "", "SMTP password; prefer WEBVPN_SMTP_PASS")
 	flag.StringVar(&c.smtpFrom, "smtp-from", "", "envelope sender address")
 	flag.BoolVar(&c.smtpImplicit, "smtp-implicit-tls", false, "dial SMTP over TLS directly (port 465) instead of STARTTLS")
 	flag.BoolVar(&c.smtpInsecure, "smtp-insecure", false, "skip SMTP certificate verification")
@@ -102,7 +102,7 @@ func main() {
 	flag.BoolVar(&c.trustForwarded, "trust-forwarded-for", false, "read the client IP from X-Forwarded-For (only behind your own proxy)")
 	flag.Parse()
 
-	if v := os.Getenv("WVPN_SMTP_PASS"); v != "" {
+	if v := os.Getenv("WEBVPN_SMTP_PASS"); v != "" {
 		c.smtpPass = v
 	}
 

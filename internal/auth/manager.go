@@ -295,9 +295,11 @@ func (m *Manager) SessionFor(r *http.Request) (*Session, bool) {
 
 // ---------------------------------------------------------------- sign-in ---
 
+// loginPageData deliberately carries no configuration. The sign-in page names
+// neither the product nor the default e-mail domain, so scanning it tells an
+// outsider nothing about the organisation behind the gateway.
 type loginPageData struct {
-	DefaultDomain string
-	Next          string
+	Next string
 }
 
 func (m *Manager) handleLoginPage(w http.ResponseWriter, r *http.Request) {
@@ -308,10 +310,7 @@ func (m *Manager) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Referrer-Policy", "no-referrer")
-	data := loginPageData{
-		DefaultDomain: m.store.Get().DefaultDomain,
-		Next:          m.safeNext(r.URL.Query().Get("next")),
-	}
+	data := loginPageData{Next: m.safeNext(r.URL.Query().Get("next"))}
 	if err := m.tmplLogin.Execute(w, data); err != nil {
 		m.log.Printf("auth: rendering login page: %v", err)
 	}

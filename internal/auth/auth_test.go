@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -406,5 +407,40 @@ func TestLoginRedirectAcrossHosts(t *testing.T) {
 	}
 	if got := m.safeNext("/secret"); got != "/secret" {
 		t.Errorf("safeNext(/secret) = %q", got)
+	}
+}
+
+func TestLoginPageRevealsNothing(t *testing.T) {
+	m, _ := newManager(t, Config{
+		DefaultDomain: "internal-corp.example",
+		AllowedUsers:  []string{"*@internal-corp.example"},
+	})
+	srv, client := newServer(t, m)
+
+	resp, err := client.Get(srv.URL + "/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(body)
+
+	// Neither the mail domain nor the product may be recoverable by fetching
+	// the sign-in page.
+	for _, leak := range []string{"internal-corp.example", "webvpn", "WebVPN", "wvpn"} {
+		if strings.Contains(page, leak) {
+			t.Errorf("sign-in page leaks %q", leak)
+		}
+	}
+	if !strings.Contains(page, "user@domain.com") {
+		t.Error("sign-in page lost its generic placeholder")
+	}
+
+	// Completing a bare user name still works, it is just never advertised.
+	if got, err := m.store.NormalizeEmail("alice"); err != nil || got != "alice@internal-corp.example" {
+		t.Fatalf("NormalizeEmail = %q, %v", got, err)
 	}
 }

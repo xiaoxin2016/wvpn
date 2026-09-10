@@ -1,11 +1,11 @@
-# wvpn
+# WebVPN
 
 一个用 Go 实现的 WebVPN 网关：浏览器用邮箱验证码登录后，在门户里输入任意 http/https 地址，
 由网关代为访问并改写响应，使整个站点后续的请求都回流到网关。本质上是一个**按目标动态路由的
 反向代理 + 内容改写器**，不需要客户端安装任何东西。
 
 ```
-浏览器 ──TLS──> wvpn 网关 ──> 目标站点 (http/https/ws/wss)
+浏览器 ──TLS──> WebVPN 网关 ──> 目标站点 (http/https/ws/wss)
           登录态          URL 编解码 + HTML/CSS 改写 + 运行期 JS 补丁
 ```
 
@@ -28,13 +28,31 @@
 - **SSRF 防护**：默认拒绝环回、RFC1918、链路本地、CGNAT、组播地址，且在 `net.Dialer.Control`
   中对**实际解析结果**再校验一次，因此 DNS 重绑定（DNS rebinding）同样被拦下。
 
+## 界面
+
+登录页只有一个邮箱输入框：既不出现产品名称，也不出现默认邮箱域，
+对未认证访问者不暴露任何组织信息。
+
+<p align="center">
+  <img src="docs/screenshots/login.png" alt="登录页" width="330">
+  <img src="docs/screenshots/login-code.png" alt="验证码" width="330">
+</p>
+
+登录后的门户：协议选择 + 地址栏直达，下面是最近访问（仅存于本地浏览器）与运维配置的常用链接。
+
+![门户](docs/screenshots/portal.png)
+
+管理后台：默认邮箱域、允许登录账号（通配符）、管理员列表，以及活动会话的查看与注销。
+
+![管理后台](docs/screenshots/admin.png)
+
 ## 快速开始
 
 ```bash
-go build -o wvpn ./cmd/wvpn
+go build -o webvpn ./cmd/webvpn
 
 # 本地试跑：验证码打印到控制台，允许访问内网地址
-./wvpn -addr 127.0.0.1:8080 \
+./webvpn -addr 127.0.0.1:8080 \
        -ignore-email \
        -allow-private \
        -default-domain test.com \
@@ -48,11 +66,11 @@ go build -o wvpn ./cmd/wvpn
 生产环境用 SMTP 发信：
 
 ```bash
-WVPN_SMTP_PASS='...' ./wvpn -addr :443 \
-  -tls-cert /etc/ssl/wvpn.crt -tls-key /etc/ssl/wvpn.key \
+WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
+  -tls-cert /etc/ssl/webvpn.crt -tls-key /etc/ssl/webvpn.key \
   -smtp-addr smtp.example.com:587 -smtp-user no-reply@example.com -smtp-from no-reply@example.com \
   -default-domain example.com -allow-user '*@example.com' -admin 'ops@example.com' \
-  -config /var/lib/wvpn/config.json -bookmarks /etc/wvpn/bookmarks.json
+  -config /var/lib/webvpn/config.json -bookmarks /etc/webvpn/bookmarks.json
 ```
 
 ## 命令行参数
@@ -69,13 +87,13 @@ WVPN_SMTP_PASS='...' ./wvpn -addr :443 \
 | `-insecure-tls` | `false` | 不校验上游证书 |
 | `-max-rewrite-bytes` | `8MiB` | 超过此大小的响应体不改写，直接透传 |
 | `-no-auth` | `false` | 关闭登录（仅供开发） |
-| `-config` | `wvpn-config.json` | 管理后台可写的策略文件 |
+| `-config` | `webvpn-config.json` | 管理后台可写的策略文件 |
 | `-default-domain` / `-allow-user` / `-admin` | — | 策略文件不存在时的初始值 |
 | `-session-ttl` / `-code-ttl` | `12h` / `5m` | 会话与验证码有效期 |
 | `-ignore-email` | `false` | **把验证码打印到控制台**，不发邮件 |
-| `-smtp-addr` / `-smtp-user` / `-smtp-pass` / `-smtp-from` | — | SMTP 提交服务；密码优先取环境变量 `WVPN_SMTP_PASS` |
+| `-smtp-addr` / `-smtp-user` / `-smtp-pass` / `-smtp-from` | — | SMTP 提交服务；密码优先取环境变量 `WEBVPN_SMTP_PASS` |
 | `-smtp-implicit-tls` | `false` | 直接 TLS（465）而非 STARTTLS（587） |
-| `-name` / `-bookmarks` | `访问网关` | 门户标题与常用链接文件 |
+| `-name` / `-bookmarks` | `WebVPN` | 门户标题与常用链接文件 |
 | `-trust-forwarded-for` | `false` | 从 `X-Forwarded-For` 取客户端 IP（仅在自有反代之后开启） |
 
 `bookmarks.json` 的格式：
@@ -90,8 +108,9 @@ WVPN_SMTP_PASS='...' ./wvpn -addr :443 \
 
 ## 登录与权限
 
-- 登录页**不出现任何产品名称**，只有邮箱输入框；错误信息统一，不区分“账号不存在”与“无权限”，
-  避免账号枚举（user enumeration）。
+- 登录页**不出现任何产品名称，也不显示已配置的默认邮箱域**（占位符固定为 `user@domain.com`），
+  避免扫描者从登录页反推出组织的邮件域；错误信息统一，不区分“账号不存在”与“无权限”，
+  避免账号枚举（user enumeration）。默认域只在服务端补全，只填前缀依然可以登录。
 - 验证码 6 位、内存中只存 SHA-256、默认 5 分钟过期、最多 5 次尝试、同一地址 60 秒内不重发，
   另有基于来源 IP 的滑动窗口限流。
 - 会话 Cookie 为 `HttpOnly` + `SameSite=Lax`，HTTPS 下自动加 `Secure`；
@@ -125,7 +144,7 @@ WVPN_SMTP_PASS='...' ./wvpn -addr :443 \
 ## 代码结构
 
 ```
-cmd/wvpn/main.go            命令行、装配、优雅退出
+cmd/webvpn/main.go          命令行、装配、优雅退出
 internal/webvpn/codec.go    三种 URL 编解码（plain / wrd / subdomain）
 internal/webvpn/rewrite.go  HTML / CSS 改写（基于 x/net/html tokenizer，未改动的 token 原样透传）
 internal/webvpn/proxy.go    ReverseProxy 装配、请求/响应改写、Cookie 重定域

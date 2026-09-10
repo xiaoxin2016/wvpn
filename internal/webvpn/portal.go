@@ -87,7 +87,7 @@ type portalData struct {
 func (h *Handler) servePortal(w http.ResponseWriter, r *http.Request) {
 	data := portalData{Name: h.opts.Portal.Name, URLMode: h.codec.Name()}
 	if data.Name == "" {
-		data.Name = "访问网关"
+		data.Name = "WebVPN"
 	}
 	if h.opts.Identity != nil {
 		data.Email, data.Admin, data.SignedIn = h.opts.Identity.User(r)
