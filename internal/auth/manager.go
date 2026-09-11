@@ -14,6 +14,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync"
@@ -55,9 +56,12 @@ type Options struct {
 	// NextDomain is the domain whose sub-domains may appear in an absolute
 	// ?next= parameter. Everything else falls back to the portal.
 	NextDomain string
-	// TrustForwardedFor makes rate limiting read X-Forwarded-For. Only enable
-	// it behind a reverse proxy you control.
-	TrustForwardedFor bool
+	// TrustProxyHeaders makes the gateway believe X-Real-IP and
+	// X-Forwarded-For from any peer. Without it the headers are still read,
+	// but only when the connection comes from a loopback address — which is
+	// where a reverse proxy on the same host sits, and which a remote client
+	// cannot forge.
+	TrustProxyHeaders bool
 	// AdminNotice is shown on the admin page's access section. The gateway uses
 	// it to spell out the command-line limits the console cannot widen.
 	AdminNotice string
@@ -429,19 +433,44 @@ func (m *Manager) rateLimited(ip string) bool {
 	return false
 }
 
+// clientIP reports who the request is really from.
+//
+// Behind nginx every connection arrives from 127.0.0.1, which makes both the
+// session list and the rate limiter useless. The forwarding headers are
+// therefore honoured when the immediate peer is loopback — a local reverse
+// proxy — or when the operator has said to trust them outright. A client that
+// reaches the gateway directly cannot talk its way into a different address.
 func (m *Manager) clientIP(r *http.Request) string {
-	if m.opts.TrustForwardedFor {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
-				return strings.TrimSpace(first)
-			}
+	peer := peerIP(r)
+	if !m.opts.TrustProxyHeaders && !isLoopbackAddr(peer) {
+		return peer
+	}
+	if ip := strings.TrimSpace(r.Header.Get("X-Real-IP")); ip != "" {
+		return ip
+	}
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		// The left-most entry is the original client; the rest are proxies.
+		if first, _, _ := strings.Cut(xff, ","); strings.TrimSpace(first) != "" {
+			return strings.TrimSpace(first)
 		}
 	}
+	return peer
+}
+
+func peerIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+func isLoopbackAddr(host string) bool {
+	addr, err := netip.ParseAddr(strings.Trim(host, "[]"))
+	if err != nil {
+		return false
+	}
+	return addr.IsLoopback()
 }
 
 type codeRequest struct {
@@ -703,11 +732,16 @@ type adminConfig struct {
 }
 
 type adminSMTP struct {
-	Addr        string `json:"addr"`
-	From        string `json:"from"`
-	Username    string `json:"username"`
-	ImplicitTLS bool   `json:"implicit_tls"`
-	Insecure    bool   `json:"insecure_skip_verify"`
+	Addr     string `json:"addr"`
+	From     string `json:"from"`
+	Username string `json:"username"`
+	// TLSMode is one of store.TLSAuto, TLSRequire, TLSNone, TLSImplicit.
+	TLSMode string `json:"tls_mode"`
+	// AllowPlaintext permits AUTH on a connection with no encryption, which an
+	// internal relay on port 25 may be the only way to use.
+	AllowPlaintext bool   `json:"allow_plaintext_auth"`
+	HELO           string `json:"helo"`
+	Insecure       bool   `json:"insecure_skip_verify"`
 	// Password is write-only. Empty means "keep the stored one", which is what
 	// lets the page save the section without ever holding the secret.
 	Password string `json:"password"`
@@ -726,12 +760,14 @@ func viewOf(c store.Config) adminConfig {
 		Access:        c.Access,
 		Bookmarks:     c.Bookmarks,
 		SMTP: adminSMTP{
-			Addr:        c.SMTP.Addr,
-			From:        c.SMTP.From,
-			Username:    c.SMTP.Username,
-			ImplicitTLS: c.SMTP.ImplicitTLS,
-			Insecure:    c.SMTP.InsecureSkipVerify,
-			PasswordSet: c.SMTP.Password != "",
+			Addr:           c.SMTP.Addr,
+			From:           c.SMTP.From,
+			Username:       c.SMTP.Username,
+			TLSMode:        c.SMTP.Mode(),
+			AllowPlaintext: c.SMTP.AllowPlaintextAuth,
+			HELO:           c.SMTP.HELO,
+			Insecure:       c.SMTP.InsecureSkipVerify,
+			PasswordSet:    c.SMTP.Password != "",
 		},
 	}
 }
@@ -749,7 +785,9 @@ func merge(in adminConfig, current store.Config) store.Config {
 			Addr:               in.SMTP.Addr,
 			From:               in.SMTP.From,
 			Username:           in.SMTP.Username,
-			ImplicitTLS:        in.SMTP.ImplicitTLS,
+			TLSMode:            in.SMTP.TLSMode,
+			AllowPlaintextAuth: in.SMTP.AllowPlaintext,
+			HELO:               in.SMTP.HELO,
 			InsecureSkipVerify: in.SMTP.Insecure,
 			Password:           in.SMTP.Password,
 		},

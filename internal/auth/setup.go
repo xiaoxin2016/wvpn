@@ -174,7 +174,9 @@ func (m *Manager) setupConfig(req setupRequest) (store.Config, string, error) {
 		From:               strings.TrimSpace(req.SMTP.From),
 		Username:           strings.TrimSpace(req.SMTP.Username),
 		Password:           req.SMTP.Password,
-		ImplicitTLS:        req.SMTP.ImplicitTLS,
+		TLSMode:            req.SMTP.TLSMode,
+		AllowPlaintextAuth: req.SMTP.AllowPlaintext,
+		HELO:               strings.TrimSpace(req.SMTP.HELO),
 		InsecureSkipVerify: req.SMTP.Insecure,
 	}
 	return cfg, admin, nil
@@ -210,7 +212,9 @@ func (m *Manager) handleSetupTest(w http.ResponseWriter, r *http.Request) {
 			From:               strings.TrimSpace(s.From),
 			Username:           strings.TrimSpace(s.Username),
 			Password:           s.Password,
-			ImplicitTLS:        s.ImplicitTLS,
+			TLSMode:            s.TLSMode,
+			AllowPlaintextAuth: s.AllowPlaintext,
+			HELO:               strings.TrimSpace(s.HELO),
 			InsecureSkipVerify: s.Insecure,
 		}
 	}

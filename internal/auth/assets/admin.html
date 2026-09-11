@@ -196,7 +196,7 @@
       <div>
         <label for="smtp-user">用户名</label>
         <input id="smtp-user" type="text" autocomplete="off" spellcheck="false" autocapitalize="off">
-        <p class="sub">留空表示不做 SMTP 认证。</p>
+        <p class="sub">留空表示不做 SMTP 认证（内网中继常见）。</p>
       </div>
       <div>
         <label for="smtp-pass">密码</label>
@@ -206,10 +206,30 @@
       </div>
     </div>
 
+    <div class="grid two" style="margin-top:16px">
+      <div>
+        <label for="smtp-tls-mode">传输加密</label>
+        <select id="smtp-tls-mode">
+          <option value="auto">自动：服务器支持 STARTTLS 就升级（默认）</option>
+          <option value="require">必须加密：不支持 STARTTLS 则拒绝发送</option>
+          <option value="none">不加密：始终明文（仅限可信内网）</option>
+          <option value="implicit">直接 TLS：端口 465</option>
+        </select>
+        <p class="sub">25 端口的内网中继通常用“自动”即可。</p>
+      </div>
+      <div>
+        <label for="smtp-helo">EHLO 名称（可选）</label>
+        <input id="smtp-helo" type="text" placeholder="gateway.corp.local" spellcheck="false" autocapitalize="off">
+        <p class="sub">部分中继会拒绝默认的 <code>localhost</code>。</p>
+      </div>
+    </div>
+
     <div class="checks">
-      <label class="check"><input type="checkbox" id="smtp-tls"><span>直接 TLS（端口 465）</span></label>
+      <label class="check"><input type="checkbox" id="smtp-plain"><span>允许明文认证</span></label>
       <label class="check"><input type="checkbox" id="smtp-insecure"><span>跳过证书校验（不建议）</span></label>
     </div>
+    <p class="sub" style="margin-top:10px">未加密的连接上默认不会发送账号密码。若中继只支持 25 端口明文
+      且必须认证，勾选“允许明文认证”——凭据将以明文经过网络。</p>
 
     <div class="actions">
       <button class="primary" id="save-mail">保存</button>
@@ -277,7 +297,8 @@
   // The API round-trips the whole configuration, so every section saves on top
   // of the last known state instead of blanking the fields it does not show.
   const EMPTY = {default_domain:"", allowed_users:[], admins:[], access:{mode:"off", sites:[]},
-                 bookmarks:[], smtp:{addr:"", from:"", username:"", implicit_tls:false,
+                 bookmarks:[], smtp:{addr:"", from:"", username:"", tls_mode:"auto",
+                                     allow_plaintext_auth:false, helo:"",
                                      insecure_skip_verify:false, password:"", clear_password:false,
                                      password_set:false}};
   let cfg = JSON.parse(JSON.stringify(EMPTY));
@@ -307,7 +328,9 @@
     $("smtp-from").value = cfg.smtp.from || "";
     $("smtp-user").value = cfg.smtp.username || "";
     $("smtp-pass").value = "";
-    $("smtp-tls").checked = !!cfg.smtp.implicit_tls;
+    $("smtp-tls-mode").value = cfg.smtp.tls_mode || "auto";
+    $("smtp-helo").value = cfg.smtp.helo || "";
+    $("smtp-plain").checked = !!cfg.smtp.allow_plaintext_auth;
     $("smtp-insecure").checked = !!cfg.smtp.insecure_skip_verify;
     $("pass-hint").textContent = cfg.smtp.password_set ? "已保存密码，留空表示不修改。" : "尚未配置密码。";
     $("clear-pass").hidden = !cfg.smtp.password_set;
@@ -355,7 +378,9 @@
       addr: $("smtp-addr").value.trim(),
       from: $("smtp-from").value.trim(),
       username: $("smtp-user").value.trim(),
-      implicit_tls: $("smtp-tls").checked,
+      tls_mode: $("smtp-tls-mode").value,
+      allow_plaintext_auth: $("smtp-plain").checked,
+      helo: $("smtp-helo").value.trim(),
       insecure_skip_verify: $("smtp-insecure").checked,
       password: $("smtp-pass").value,
       clear_password: clearPassword,

@@ -60,6 +60,8 @@ type Handler struct {
 	log   *log.Logger
 	// trust holds the upstream certificates a user has confirmed by hand.
 	trust *trustStore
+	// jars hold the domain-scoped cookies that single sign-on depends on.
+	jars *sessionJars
 }
 
 type ctxKey struct{}
@@ -71,6 +73,8 @@ type reqInfo struct {
 	secure bool
 	// site carries the name-phase site-policy result into the dial-time check.
 	site SiteCheck
+	// jarKey identifies the browser's server-side cookie jar.
+	jarKey string
 }
 
 func withInfo(ctx context.Context, info *reqInfo) context.Context {
@@ -125,6 +129,7 @@ func New(opts Options) *Handler {
 		rw:    Rewriter{Codec: opts.Codec},
 		log:   opts.Logger,
 		trust: newTrustStore(),
+		jars:  newSessionJars(),
 	}
 
 	dialer := &net.Dialer{
@@ -251,7 +256,12 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 		http.Error(w, "目标被网关策略拒绝: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	info := &reqInfo{target: target, secure: isSecureRequest(r), site: check}
+	info := &reqInfo{
+		target: target,
+		secure: isSecureRequest(r),
+		site:   check,
+		jarKey: h.sessionKey(r),
+	}
 	h.rp.ServeHTTP(w, r.WithContext(withInfo(r.Context(), info)))
 }
 
@@ -287,16 +297,20 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 	// or zstd on our behalf.
 	pr.Out.Header.Set("Accept-Encoding", "gzip")
 
-	// The gateway's own session cookie must not reach the origin.
+	// Cookies are edited as text: parsing them into http.Cookie and writing
+	// them back mangles or drops values the origin is entitled to send.
+	header := pr.Out.Header.Get("Cookie")
 	if name := h.opts.SessionCookie; name != "" {
-		if cookies := pr.Out.Cookies(); len(cookies) > 0 {
-			pr.Out.Header.Del("Cookie")
-			for _, c := range cookies {
-				if c.Name != name {
-					pr.Out.AddCookie(c)
-				}
-			}
-		}
+		// The gateway's own session cookie must not reach the origin.
+		header = filterCookieHeader(header, name)
+	}
+	if jar := h.jars.lookup(info.jarKey); jar != nil {
+		header = appendCookiePairs(header, jarPairs(jar, target, cookieHeaderNames(header)))
+	}
+	if header == "" {
+		pr.Out.Header.Del("Cookie")
+	} else {
+		pr.Out.Header.Set("Cookie", header)
 	}
 
 	// Referer and Origin must be expressed in the target's own terms, otherwise
@@ -382,34 +396,38 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 // rewriteCookies re-scopes Set-Cookie onto the gateway. Under the path codecs,
 // path scoping is what keeps two proxied origins out of each other's cookies;
 // under the subdomain codec the browser's own origin separation does that job
-// and the path is left alone.
+// and the path is left alone. Domain-scoped cookies go to the server-side jar
+// instead, because the gateway has no second domain to put them on.
 func (h *Handler) rewriteCookies(resp *http.Response, info *reqInfo) {
-	cookies := resp.Cookies()
-	if len(cookies) == 0 {
+	raws := resp.Header.Values("Set-Cookie")
+	if len(raws) == 0 {
 		return
 	}
 	resp.Header.Del("Set-Cookie")
-	for _, c := range cookies {
-		if c.Name == h.opts.SessionCookie {
+
+	var shared []*http.Cookie
+	for _, raw := range raws {
+		sc, ok := parseSetCookie(raw)
+		if !ok {
+			continue
+		}
+		if sc.Name == h.opts.SessionCookie {
 			continue // never let an origin overwrite the gateway session
 		}
-		p := c.Path
-		if p == "" || !strings.HasPrefix(p, "/") {
-			p = "/"
+		toJar, toBrowser := sc.domainScope(info.target)
+		if toJar && info.jarKey != "" {
+			shared = append(shared, sc.toHTTPCookie())
+		} else if toJar {
+			// No signed-in browser to attach a jar to; the browser copy is
+			// then the only copy there can be.
+			toBrowser = true
 		}
-		c.Path = h.cookiePath(info.target, p)
-		c.Domain = "" // host-only, on the gateway
-		if !info.secure {
-			// A Secure cookie is dropped outright over plain HTTP, and
-			// SameSite=None is only honoured together with Secure.
-			c.Secure = false
-			if c.SameSite == http.SameSiteNoneMode {
-				c.SameSite = http.SameSiteLaxMode
-			}
+		if toBrowser {
+			resp.Header.Add("Set-Cookie", sc.rewrite(h.cookiePath(info.target, sc.originPath()), info.secure))
 		}
-		if v := c.String(); v != "" {
-			resp.Header.Add("Set-Cookie", v)
-		}
+	}
+	if len(shared) > 0 {
+		storeShared(h.jars.get(info.jarKey), info.target, shared)
 	}
 }
 

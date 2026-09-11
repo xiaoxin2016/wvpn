@@ -42,6 +42,20 @@ type Config struct {
 	SMTP SMTP `json:"smtp"`
 }
 
+// TLS modes for a mail submission service.
+const (
+	// TLSAuto upgrades with STARTTLS when the server offers it, and stays in
+	// the clear when it does not. This is what an internal relay on port 25
+	// usually needs.
+	TLSAuto = "auto"
+	// TLSRequire refuses to send unless STARTTLS succeeds.
+	TLSRequire = "require"
+	// TLSNone never upgrades, even if the server offers it.
+	TLSNone = "none"
+	// TLSImplicit dials TLS directly, as port 465 expects.
+	TLSImplicit = "implicit"
+)
+
 // SMTP is the mail submission service used for verification codes.
 //
 // Password is stored as written, in the same 0600 JSON file as the rest of the
@@ -49,17 +63,39 @@ type Config struct {
 // meaningful on a single host. Give the gateway its own submission account or
 // an app password, not a mailbox that matters.
 type SMTP struct {
-	// Addr is host:port, e.g. smtp.example.com:587.
+	// Addr is host:port, e.g. smtp.example.com:587 or an internal relay on :25.
 	Addr string `json:"addr"`
 	// From is the envelope sender and the From: header.
 	From string `json:"from"`
-	// Username and Password enable AUTH when set.
+	// Username and Password enable AUTH when set. An internal relay that
+	// accepts mail from the gateway's address needs neither.
 	Username string `json:"username"`
 	Password string `json:"password"`
-	// ImplicitTLS dials TLS directly (port 465) instead of STARTTLS (587).
-	ImplicitTLS bool `json:"implicit_tls"`
+	// TLSMode is one of TLSAuto, TLSRequire, TLSNone or TLSImplicit.
+	TLSMode string `json:"tls_mode"`
+	// ImplicitTLS is the previous form of TLSMode == TLSImplicit. It is read
+	// when TLSMode is empty so an older configuration file still works.
+	ImplicitTLS bool `json:"implicit_tls,omitempty"`
+	// AllowPlaintextAuth permits sending the password over a connection that
+	// was never encrypted. Off by default, because that is what it sounds like.
+	AllowPlaintextAuth bool `json:"allow_plaintext_auth"`
+	// HELO overrides the name the gateway announces itself with. Some relays
+	// reject the default.
+	HELO string `json:"helo,omitempty"`
 	// InsecureSkipVerify disables certificate verification.
 	InsecureSkipVerify bool `json:"insecure_skip_verify"`
+}
+
+// Mode returns the TLS mode to use, migrating the older implicit_tls field.
+func (s SMTP) Mode() string {
+	switch s.TLSMode {
+	case TLSAuto, TLSRequire, TLSNone, TLSImplicit:
+		return s.TLSMode
+	}
+	if s.ImplicitTLS {
+		return TLSImplicit
+	}
+	return TLSAuto
 }
 
 // Configured reports whether the console has a usable SMTP service.
@@ -171,6 +207,10 @@ func normalizeConfig(c Config) Config {
 	c.SMTP.Addr = strings.TrimSpace(c.SMTP.Addr)
 	c.SMTP.From = strings.TrimSpace(c.SMTP.From)
 	c.SMTP.Username = strings.TrimSpace(c.SMTP.Username)
+	c.SMTP.HELO = strings.TrimSpace(c.SMTP.HELO)
+	// Collapse the legacy flag into the mode, so there is one source of truth.
+	c.SMTP.TLSMode = c.SMTP.Mode()
+	c.SMTP.ImplicitTLS = false
 	return c
 }
 
@@ -210,6 +250,10 @@ func (c Config) clone() Config {
 	c.SMTP.Addr = strings.TrimSpace(c.SMTP.Addr)
 	c.SMTP.From = strings.TrimSpace(c.SMTP.From)
 	c.SMTP.Username = strings.TrimSpace(c.SMTP.Username)
+	c.SMTP.HELO = strings.TrimSpace(c.SMTP.HELO)
+	// Collapse the legacy flag into the mode, so there is one source of truth.
+	c.SMTP.TLSMode = c.SMTP.Mode()
+	c.SMTP.ImplicitTLS = false
 	return c
 }
 
@@ -268,6 +312,11 @@ func validateSMTP(s SMTP) error {
 	}
 	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
 		return fmt.Errorf("SMTP 端口 %q 不合法", port)
+	}
+	switch s.TLSMode {
+	case "", TLSAuto, TLSRequire, TLSNone, TLSImplicit:
+	default:
+		return fmt.Errorf("未知的 TLS 模式 %q", s.TLSMode)
 	}
 	if s.From == "" {
 		return fmt.Errorf("发件人地址不能为空")

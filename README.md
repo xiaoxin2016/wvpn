@@ -18,6 +18,8 @@
   | `plain`（默认） | `/p/https/example.com/path?q=1` | 可读、易调试，单域名即可部署 |
   | `wrd` | `/https/<hex(iv)+hex(enc(host))>/path` | 目标主机名不出现在地址栏；形态对齐国内高校常见商用产品 |
   | `subdomain` | `http://a--b-example-com-s.<base>/path` | 每个目标独立浏览器 Origin，隔离最好；需要泛域名 DNS 与泛域名证书 |
+- **单点登录可用**：域级 Cookie（`Domain=.corp.example`）由网关按浏览器会话存放并按域回放，
+  跨主机的 SSO 跳转链路可以走通；Cookie 一律按原始字节透传，不经 Go 的 cookie 序列化器。
 - **内容改写**：HTML（`href/src/srcset/action/formaction/poster/data/xlink:href/style/<base>/meta refresh` 等）、
   CSS（`url()` / `@import`）、`Location` 与 `Link` 响应头、`Set-Cookie` 作用域。
 - **运行期补丁**（注入的 `shim.js`）：`fetch`、`XMLHttpRequest`、`WebSocket`、`EventSource`、
@@ -122,10 +124,13 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 | `-session-ttl` / `-code-ttl` | `12h` / `5m` | 会话与验证码有效期 |
 | `-ignore-email` | `false` | **把验证码打印到控制台**，不发邮件 |
 | `-smtp-addr` / `-smtp-user` / `-smtp-pass` / `-smtp-from` | — | SMTP 提交服务，作为管理后台未配置时的兜底；密码优先取环境变量 `WEBVPN_SMTP_PASS` |
+| `-smtp-tls-mode` | `auto` | `auto`（支持 STARTTLS 就升级）/ `require` / `none` / `implicit`（465 直接 TLS） |
+| `-smtp-allow-plaintext-auth` | `false` | 允许在未加密连接上发送 SMTP 账号密码 |
+| `-smtp-helo` | — | EHLO 名称，部分中继拒绝默认值 |
 | `-smtp-implicit-tls` | `false` | 直接 TLS（465）而非 STARTTLS（587） |
 | `-name` | `WebVPN` | 门户标题 |
 | `-bookmarks` | — | 书签 JSON 文件，仅在首次启动（策略文件中还没有书签时）导入一次，之后由管理后台接管 |
-| `-trust-forwarded-for` | `false` | 从 `X-Forwarded-For` 取客户端 IP（仅在自有反代之后开启） |
+| `-trust-proxy-headers` | `false` | 无条件相信 `X-Real-IP` / `X-Forwarded-For`；来自**环回地址**的连接无论该参数如何都会读这两个头（本机 nginx 反代即属此列） |
 
 `bookmarks.json` 的格式（仅用于首次导入，之后在管理后台里编辑）：
 
@@ -185,6 +190,21 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 首次部署的引导顺序：用 `-ignore-email` 起一次，从控制台读验证码登录，在后台把 SMTP 填好，
 然后去掉该参数重启。后台页面上有"保存并发送测试邮件"，走的是与真实验证码完全相同的发送路径。
 
+支持的传输组合：
+
+| 场景 | 配置 |
+| --- | --- |
+| 内网中继，25 端口，无认证 | 地址填 `relay:25`，用户名密码留空，模式 `auto` |
+| 提交服务，587 + STARTTLS | 模式 `auto` 或 `require` |
+| 提交服务，465 直接 TLS | 模式 `implicit` |
+| 25 端口且必须认证 | 勾选“允许明文认证”，凭据将以明文经过网络 |
+
+认证机制按服务器通告自动选择：未加密时优先 CRAM-MD5（口令不过网），否则 PLAIN / LOGIN
+（`AUTH LOGIN` 是 Exchange 等旧中继的唯一选项，Go 标准库不实现，网关自己实现了）。
+
+> 为什么不是直接用 `net/smtp.SendMail`：它在未加密连接上拒绝认证，只抛出 `unencrypted connection`，
+> 既不说明原因也没有开关。默认拒绝是对的，无条件拒绝不是——25 端口的内网中继是常态。
+
 几点与安全相关的设计：
 
 - **密码不回显**：`GET /admin/api/config` 只返回 `password_set: true|false`，不返回密码本身；
@@ -192,6 +212,32 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 - **测试邮件只发给当前登录的管理员**，接口不接受收件人参数——否则这个表单就是一台开放的发信中继。
 - **密码以明文存在配置文件里**（0600）。单机部署没有可用来加密它的密钥托管，与其做"看起来加密"
   的混淆不如说清楚：请给网关配一个专用发信账号或应用专用密码，不要用重要邮箱的主密码。
+
+## Cookie 与单点登录
+
+两个只有代理才会遇到的问题，都会表现为“登录成功后立刻提示登录态失效”：
+
+**一、Cookie 的字节必须原样透传。** Go 的 `net/http` 对 cookie 很严格：值里含非 ASCII 字符的
+`Set-Cookie` 会被**整条丢弃**，含空格或逗号的值会被重新加引号，而 `Request.AddCookie` 会把
+非法字节从值里剔除。任何一条都足以毁掉一个会话令牌——且只影响那些令牌恰好含这类字节的系统，
+所以“并非所有系统都有这个问题”。网关因此把 Cookie 当文本处理：只改属性，`name=value` 原样搬运。
+
+**二、域级 Cookie 无处安放。** SSO 的做法是给整个域签发一张 Cookie（`Domain=.corp.example`），
+域内所有站点都能读到。但网关把这些站点放在**同一个浏览器源**下，彼此只靠路径隔离，而路径是按主机分的，
+没有第二个域可以承载它。所以带 `Domain` 的 Cookie 由网关**按浏览器会话存在服务端**，
+在请求匹配该域的目标时回放。这正是让“在 sso.corp.example 登录、跳回 app.corp.example 后仍是登录态”成立的机制。
+
+细节：
+
+- 服务端 Cookie 罐按登录会话隔离（键取会话令牌的哈希，不另存令牌本身），空闲 12 小时回收。
+- `Domain` 等于自身主机的 Cookie 会**同时**放进罐子和浏览器，页面脚本仍可读到自己的 Cookie。
+- `Domain` 与目标主机无关的 Cookie 被丢弃——真实浏览器同样会拒绝。
+- 关闭登录（`-no-auth`）时没有会话可挂，域级 Cookie 退回浏览器路径隔离的老行为。
+
+**已知限制**：页面若用 `location.href = "https://other.intra.com/..."` 这类**绝对地址**跳转，
+浏览器会直接离开网关去访问真实域名——JS 无法拦截对 `location.href` 的赋值。网关已覆盖
+`location.assign/replace`、`window.open`、`history.pushState`、表单提交与链接点击（捕获阶段），
+但上述赋值形式属于无解项；改用子域名模式可以规避（那时"真实域名"就是网关的子域）。
 
 ## 访问策略
 
@@ -258,6 +304,10 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 9. **初始化令牌会出现在启动日志里**。如果日志被集中采集，令牌也会跟着进日志系统；
    它在管理员首次登录后即失效，但在此之前等同于"可以配置这台网关"。
 10. **自签名证书的信任是网关级的**，任一登录用户确认后对所有人生效（见上一节）。
+11. **“允许明文认证”会把 SMTP 账号密码以明文送上网络**。仅在可信内网段内使用，
+    并给网关配专用发信账号。
+12. **服务端 Cookie 罐保存的是各业务系统的会话凭据**，进程内存中，按登录会话隔离。
+    网关进程的内存转储等同于泄露这些系统的在线会话——与它本来就能看到全部明文流量是同一量级的信任假设。
 
 它**不能**替代真正的 VPN：只处理 HTTP 语义的流量，不承载任意 TCP/UDP；
 对强依赖自身域名、使用 Service Worker、WebAssembly 里硬编码地址或做 TLS pinning 的站点会失效。
@@ -273,6 +323,8 @@ internal/webvpn/rewrite.go  HTML / CSS 改写（基于 x/net/html tokenizer，�
 internal/webvpn/proxy.go    ReverseProxy 装配、请求/响应改写、Cookie 重定域
 internal/webvpn/guard.go    目标策略：启动参数硬边界 + 后台站点清单 + 反 DNS 重绑定
 internal/webvpn/tls.go      自定义 TLS 拨号：证书验证失败转为询问，确认后按指纹固定信任
+internal/webvpn/cookie.go   Cookie 按原始字节改写（不经 Go 的 cookie 解析/序列化）
+internal/webvpn/jar.go      域级 Cookie 的服务端存放，按登录会话隔离
 internal/webvpn/portal.go   门户页
 internal/webvpn/assets/     门户模板与运行期 shim.js
 internal/auth/manager.go    验证码、会话、登录与管理接口
@@ -311,6 +363,9 @@ go test ./internal/webvpn -bench BenchmarkHTMLRewrite -run '^$'
 覆盖：三种 codec 的往返、HTML/CSS/srcset 改写与原样透传、`<base>` 语义、SSRF 判定、
 SMTP 配置（校验、密码不回显、留空沿用、显式清除、测试邮件仅发给管理员本人）、
 自签名证书流程（询问页、指纹固定、伪造确认被拒、子资源不渲染询问页、返回地址校验）、
+Cookie 原始字节保全（非 ASCII / 空格 / 逗号 / 引号值）、域级 Cookie 的服务端回放与会话隔离、
+SMTP 传输组合（25 端口无认证、明文认证默认拒绝且提示开关、AUTH LOGIN、CRAM-MD5 优先、必须加密）、
+反向代理下的客户端 IP 识别（环回对端读 X-Real-IP，远端客户端无法伪造）、
 访问策略（黑白名单在主机名与解析地址两个阶段的判定）、端到端代理（含 gzip、跳转、
 Cookie 重定域、Referer/Origin 翻译、会话 Cookie 剥离、站点清单拦截）、
 登录全流程（含错误码、单次使用、限流、越权与跨站 POST 拒绝）、
