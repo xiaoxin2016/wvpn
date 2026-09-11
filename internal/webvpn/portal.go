@@ -8,10 +8,12 @@ import (
 	"time"
 )
 
-//go:embed assets/portal.html assets/shim.js
+//go:embed assets/portal.html assets/untrusted.html assets/shim.js
 var assetsFS embed.FS
 
 var portalTmpl = template.Must(template.ParseFS(assetsFS, "assets/portal.html"))
+
+var untrustedTmpl = template.Must(template.ParseFS(assetsFS, "assets/untrusted.html"))
 
 var shimJS, _ = assetsFS.ReadFile("assets/shim.js")
 

@@ -64,6 +64,10 @@ type Options struct {
 	// MailNotice is shown on the admin page's mail section, for when the
 	// command line overrides what the console configures.
 	MailNotice string
+	// SetupToken enables the first-run setup page while the configuration has
+	// no administrator. The gateway prints it to its own log, so holding it
+	// means having read the console.
+	SetupToken string
 
 	Logger *log.Logger
 	// Now is overridable for tests.
@@ -103,6 +107,11 @@ type Manager struct {
 
 	tmplLogin *template.Template
 	tmplAdmin *template.Template
+	tmplSetup *template.Template
+
+	// setupOpen is true while the gateway still needs an administrator, and
+	// until one has actually signed in.
+	setupOpen bool
 
 	stop chan struct{}
 	once sync.Once
@@ -149,6 +158,10 @@ func New(opts Options) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
+	setup, err := template.ParseFS(assetsFS, "assets/setup.html")
+	if err != nil {
+		return nil, err
+	}
 
 	m := &Manager{
 		opts:      opts,
@@ -159,6 +172,8 @@ func New(opts Options) (*Manager, error) {
 		ipHits:    map[string][]time.Time{},
 		tmplLogin: login,
 		tmplAdmin: admin,
+		tmplSetup: setup,
+		setupOpen: opts.SetupToken != "" && len(opts.Store.Get().Admins) == 0,
 		stop:      make(chan struct{}),
 	}
 	go m.janitor()
@@ -230,6 +245,9 @@ func (m *Manager) Routes(mux *http.ServeMux, hosts ...string) {
 		hosts = []string{""}
 	}
 	for _, host := range hosts {
+		mux.HandleFunc("GET "+host+"/setup", m.handleSetupPage)
+		mux.HandleFunc("POST "+host+"/setup", m.handleSetup)
+		mux.HandleFunc("POST "+host+"/setup/test", m.handleSetupTest)
 		mux.HandleFunc("GET "+host+"/login", m.handleLoginPage)
 		mux.HandleFunc("POST "+host+"/auth/code", m.handleRequestCode)
 		mux.HandleFunc("POST "+host+"/auth/verify", m.handleVerify)
@@ -249,6 +267,12 @@ func (m *Manager) Require(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if _, ok := m.SessionFor(r); ok {
 			next.ServeHTTP(w, r)
+			return
+		}
+		if m.NeedsSetup() && wantsHTML(r) {
+			// Nobody can sign in yet; point the browser at the thing that fixes
+			// that rather than at a login page that cannot work.
+			http.Redirect(w, r, "/setup", http.StatusFound)
 			return
 		}
 		if wantsHTML(r) {
@@ -312,6 +336,11 @@ type loginPageData struct {
 }
 
 func (m *Manager) handleLoginPage(w http.ResponseWriter, r *http.Request) {
+	if m.NeedsSetup() {
+		// Nobody can sign in yet, so the login form would be a dead end.
+		http.Redirect(w, r, "/setup", http.StatusFound)
+		return
+	}
 	if _, ok := m.SessionFor(r); ok {
 		http.Redirect(w, r, m.safeNext(r.URL.Query().Get("next")), http.StatusFound)
 		return
@@ -554,6 +583,11 @@ func (m *Manager) handleVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.SetCookie(w, m.cookie(s.token, m.opts.SessionTTL))
+	if s.Admin {
+		// The gateway has now been shown to work end to end, so the one-time
+		// setup link can stop working.
+		m.closeSetup()
+	}
 	m.log.Printf("auth: %s signed in from %s", email, m.clientIP(r))
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "redirect": m.safeNext(req.Next), "admin": s.Admin})
 }

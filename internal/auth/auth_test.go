@@ -535,3 +535,121 @@ func TestTestMailGoesOnlyToTheAdmin(t *testing.T) {
 		t.Errorf("non-admin test mail: %d, want 403", status)
 	}
 }
+
+// newSetupManager builds a gateway that has never been configured.
+func newSetupManager(t *testing.T) (*Manager, captureMailer, string) {
+	t.Helper()
+	token, err := NewSetupToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mailer := captureMailer{ch: make(chan [3]string, 4)}
+	m, err := New(Options{
+		Store:      newStore(t, store.Config{}),
+		Mailer:     mailer,
+		Logger:     log.New(os.Stderr, "test ", 0),
+		SetupToken: token,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	return m, mailer, token
+}
+
+func TestSetupFlow(t *testing.T) {
+	m, mailer, token := newSetupManager(t)
+	srv, client := newServer(t, m)
+
+	if !m.NeedsSetup() || !m.SetupPending() {
+		t.Fatal("a gateway with no administrator should need setup")
+	}
+
+	// Browsers are sent to setup rather than to a login page nobody can use.
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+	req.Header.Set("Accept", "text/html")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/setup" {
+		t.Fatalf("guard sent %d -> %q", resp.StatusCode, resp.Header.Get("Location"))
+	}
+
+	body := map[string]any{
+		"token":          "WRONG-TOKEN",
+		"admin_email":    "ops@corp.example",
+		"default_domain": "corp.example",
+		"allowed_users":  []string{"*@corp.example"},
+		"smtp": map[string]any{
+			"addr": "smtp.corp.example:587", "from": "no-reply@corp.example",
+			"username": "", "password": "", "implicit_tls": false,
+			"insecure_skip_verify": false, "clear_password": false, "password_set": false,
+		},
+	}
+	if status, out := postJSON(t, client, srv.URL+"/setup", body); status != http.StatusForbidden {
+		t.Fatalf("wrong token accepted: %d %v", status, out)
+	}
+	if len(m.store.Get().Admins) != 0 {
+		t.Fatal("a rejected setup still wrote configuration")
+	}
+
+	body["token"] = token
+	status, out := postJSON(t, client, srv.URL+"/setup", body)
+	if status != http.StatusOK || out["ok"] != true {
+		t.Fatalf("setup: %d %v", status, out)
+	}
+	cfg := m.store.Get()
+	if len(cfg.Admins) != 1 || cfg.Admins[0] != "ops@corp.example" {
+		t.Fatalf("admins = %v", cfg.Admins)
+	}
+	if cfg.DefaultDomain != "corp.example" || cfg.SMTP.Addr != "smtp.corp.example:587" {
+		t.Fatalf("config = %+v", cfg)
+	}
+
+	// The gateway is configured, so the login page must work — but the link
+	// stays valid until someone actually gets in.
+	if m.NeedsSetup() {
+		t.Error("still diverting to setup after an administrator exists")
+	}
+	if !m.SetupPending() {
+		t.Error("setup closed before anyone signed in; a broken SMTP server would lock everyone out")
+	}
+
+	signIn(t, client, srv, mailer, "ops@corp.example")
+	if m.SetupPending() {
+		t.Error("setup stayed open after the first administrator signed in")
+	}
+	if status, _ := postJSON(t, client, srv.URL+"/setup", body); status != http.StatusForbidden {
+		t.Errorf("setup still accepted after completion: %d", status)
+	}
+}
+
+func TestSetupIsOffWhenConfigured(t *testing.T) {
+	m, _ := newManager(t, store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+	})
+	if m.SetupPending() || m.NeedsSetup() {
+		t.Error("setup offered on an already configured gateway")
+	}
+}
+
+func TestSetupTokensDiffer(t *testing.T) {
+	a, err := NewSetupToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := NewSetupToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("setup tokens repeat")
+	}
+	if len(a) != 27 { // 24 base32 characters in four groups
+		t.Errorf("token %q has length %d", a, len(a))
+	}
+}

@@ -173,10 +173,21 @@ func run(c config, logger *log.Logger) error {
 	mux := http.NewServeMux()
 	var handler http.Handler = gateway
 
+	// With no administrator configured, nobody can sign in and nobody can fix
+	// that from inside the product — so the first run is bootstrapped through a
+	// setup page gated on a token printed below.
+	setupToken := ""
+	if !c.noAuth && len(cfg.Get().Admins) == 0 {
+		setupToken, err = auth.NewSetupToken()
+		if err != nil {
+			return err
+		}
+	}
+
 	if c.noAuth {
 		logger.Print("warning: -no-auth is set; anyone who can reach this port can use the gateway")
 	} else {
-		manager, err := buildAuth(c, cfg, serveTLS, logger)
+		manager, err := buildAuth(c, cfg, setupToken, serveTLS, logger)
 		if err != nil {
 			return err
 		}
@@ -208,6 +219,9 @@ func run(c config, logger *log.Logger) error {
 		scheme = "https"
 	}
 	logger.Printf("webvpn %s listening on %s://%s (url-mode=%s)", version, scheme, ln.Addr(), codec.Name())
+	if setupToken != "" {
+		logger.Print(setupBanner(scheme, ln.Addr().String(), setupToken))
+	}
 
 	errc := make(chan error, 1)
 	go func() {
@@ -261,8 +275,8 @@ func gatewayHosts(c config) []string {
 	return hosts
 }
 
-func buildAuth(c config, cfg *store.Store, serveTLS bool, logger *log.Logger) (*auth.Manager, error) {
-	mailer, err := buildMailer(c, cfg, logger)
+func buildAuth(c config, cfg *store.Store, setupToken string, serveTLS bool, logger *log.Logger) (*auth.Manager, error) {
+	mailer, err := buildMailer(c, cfg, setupToken != "", logger)
 	if err != nil {
 		return nil, err
 	}
@@ -290,6 +304,7 @@ func buildAuth(c config, cfg *store.Store, serveTLS bool, logger *log.Logger) (*
 		Mailer:            mailer,
 		MailSubject:       c.mailSubject,
 		MailNotice:        mailNotice(c, cfg),
+		SetupToken:        setupToken,
 		SessionTTL:        c.sessionTTL,
 		CodeTTL:           c.codeTTL,
 		Secure:            serveTLS,
@@ -427,7 +442,7 @@ func adminNotice(c config) string {
 // buildMailer picks how verification codes leave the process. The admin console
 // wins when it has a service configured; the command line is the fallback, and
 // -ignore-email overrides both so a developer never depends on real mail.
-func buildMailer(c config, cfg *store.Store, logger *log.Logger) (auth.Mailer, error) {
+func buildMailer(c config, cfg *store.Store, awaitingSetup bool, logger *log.Logger) (auth.Mailer, error) {
 	if c.ignoreEmail {
 		return auth.ConsoleMailer{Logger: logger}, nil
 	}
@@ -451,9 +466,10 @@ func buildMailer(c config, cfg *store.Store, logger *log.Logger) (auth.Mailer, e
 		}
 	}
 
-	if fallback == nil && !cfg.Get().SMTP.Configured() {
-		return nil, errors.New("no way to deliver codes: configure SMTP in the admin console " +
-			"(start once with -ignore-email to get in), pass -smtp-addr, or use -ignore-email for local testing")
+	if fallback == nil && !cfg.Get().SMTP.Configured() && !awaitingSetup {
+		// Not fatal during first-run setup: configuring SMTP is part of it.
+		return nil, errors.New("no way to deliver codes: configure SMTP in the admin console, " +
+			"pass -smtp-addr, or use -ignore-email for local testing")
 	}
 	return auth.StoreMailer{Store: cfg, Fallback: fallback}, nil
 }
@@ -468,4 +484,30 @@ func mailNotice(c config, cfg *store.Store) string {
 		return "当前使用启动参数 -smtp-addr 指定的服务（" + c.smtpAddr + "）；在此填写并保存后将改用本页配置。"
 	}
 	return ""
+}
+
+// setupBanner is printed once, on a gateway that has no administrator yet. The
+// token is the only credential that exists at that point, and reading the
+// process log is what proves you are the operator.
+func setupBanner(scheme, addr, token string) string {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		host, port = addr, ""
+	}
+	switch host {
+	case "", "::", "0.0.0.0", "[::]":
+		// Listening on every interface says nothing about how to reach it.
+		host = "localhost"
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	}
+	line := strings.Repeat("─", 66)
+	return "\n" + line + "\n" +
+		"  首次启动：尚未配置管理员\n" +
+		"  请在浏览器中打开以下链接完成初始化：\n\n" +
+		"    " + scheme + "://" + host + "/setup?token=" + token + "\n\n" +
+		"  该令牌仅在本次进程内有效，管理员首次登录成功后即失效。\n" +
+		"  若网关对外使用其他域名，请把上面的主机名换成对应地址。\n" +
+		line
 }

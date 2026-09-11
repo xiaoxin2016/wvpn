@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>初始化</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f4f5f7; --bg-accent:#e6e9f5; --card:#ffffff; --border:#e3e6ec; --line:#eef0f4;
+    --fg:#151a23; --muted:#6b7280; --faint:#9aa1ad;
+    --accent:#3b5bdb; --accent-fg:#fff; --accent-soft:#eef1fd;
+    --danger:#c0392f; --ok:#1d7a4c;
+    --radius:14px; --shadow:0 1px 2px rgba(16,24,40,.04), 0 12px 32px -14px rgba(16,24,40,.18);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0b0d12; --bg-accent:#121722; --card:#141821; --border:#232a37; --line:#1c2230;
+      --fg:#e8eaf0; --muted:#9aa3b2; --faint:#6b7484;
+      --accent:#6b87f0; --accent-fg:#0b0d12; --accent-soft:#1a2133;
+      --danger:#ef7a70; --ok:#5ac08a;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 20px 40px -20px rgba(0,0,0,.7);
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; padding:40px 20px;
+    background:
+      radial-gradient(1000px 600px at 12% -10%, var(--bg-accent), transparent 60%),
+      radial-gradient(900px 500px at 100% 110%, var(--bg-accent), transparent 55%),
+      var(--bg);
+    color:var(--fg);
+    font:15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+         "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", Roboto, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  main{max-width:620px; margin:0 auto}
+  .card{background:var(--card); border:1px solid var(--border); border-radius:var(--radius);
+        box-shadow:var(--shadow); padding:30px 28px 26px}
+  .mark{width:34px;height:34px;border-radius:10px;background:var(--accent-soft);
+        display:grid;place-items:center;margin-bottom:18px}
+  .mark svg{width:17px;height:17px;stroke:var(--accent);fill:none;stroke-width:1.8;
+            stroke-linecap:round;stroke-linejoin:round}
+  h1{margin:0 0 6px; font-size:20px; font-weight:650; letter-spacing:-.01em}
+  .sub{margin:0 0 22px; color:var(--muted); font-size:13.5px}
+  h2{margin:26px 0 4px; font-size:14px; font-weight:620}
+  h2:first-of-type{margin-top:0}
+  .note{margin:0 0 16px; color:var(--faint); font-size:12.5px}
+  label{display:block; font-size:12.5px; font-weight:560; color:var(--muted); margin:14px 0 7px}
+  input[type=text], input[type=email], input[type=password], textarea{
+    width:100%; border:1px solid var(--border); border-radius:10px; background:var(--bg);
+    color:var(--fg); font:inherit; padding:10px 12px; outline:0;
+    transition:border-color .15s, box-shadow .15s;
+  }
+  textarea{min-height:78px; resize:vertical; font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px}
+  input:focus, textarea:focus{border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft)}
+  .hint{margin:6px 0 0; color:var(--faint); font-size:12px}
+  .two{display:grid; gap:14px}
+  @media(min-width:600px){ .two{grid-template-columns:1fr 1fr; align-items:start} }
+  .two label{margin-top:0}
+  .checks{display:flex; flex-wrap:wrap; gap:20px; margin-top:16px}
+  .check{display:flex; align-items:center; gap:8px; font-size:13.5px; color:var(--fg); cursor:pointer}
+  .check input{width:15px;height:15px;accent-color:var(--accent);margin:0;cursor:pointer}
+  .actions{display:flex; align-items:center; gap:12px; margin-top:24px; flex-wrap:wrap}
+  button.primary{
+    padding:10px 20px; border:0; border-radius:10px; background:var(--accent);
+    color:var(--accent-fg); font:inherit; font-weight:600; cursor:pointer;
+  }
+  button.primary:hover{opacity:.92}
+  button.primary[disabled]{opacity:.55; cursor:not-allowed}
+  button.ghost{
+    padding:9px 16px; border-radius:10px; border:1px solid var(--border);
+    background:transparent; color:var(--fg); font:inherit; font-size:13.5px; cursor:pointer;
+  }
+  button.ghost:hover{border-color:var(--accent); color:var(--accent)}
+  .msg{font-size:13px; color:var(--muted); min-height:19px}
+  .msg.err{color:var(--danger)} .msg.ok{color:var(--ok)}
+  .banner{margin:0 0 20px; padding:11px 13px; border-radius:10px; background:var(--accent-soft);
+          color:var(--accent); font-size:12.5px}
+  .divider{height:1px; background:var(--line); margin:26px 0 0}
+  .done{text-align:center; padding:12px 0 4px}
+  .done a{color:var(--accent)}
+  code{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.5px;
+       background:var(--accent-soft); color:var(--accent); padding:1px 5px; border-radius:5px}
+  .hidden{display:none}
+</style>
+</head>
+<body data-token="{{.Token}}" data-mail-notice="{{.MailNotice}}">
+<main>
+  <div class="card">
+    <div class="mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24"><path d="M12 3 4 6.5v5c0 4.6 3.2 8.6 8 9.5 4.8-.9 8-4.9 8-9.5v-5L12 3Z"/></svg>
+    </div>
+
+    <section id="need-token" class="hidden">
+      <h1>需要初始化令牌</h1>
+      <p class="sub">网关启动时会把一次性初始化链接打印到进程日志，请从那里复制令牌。</p>
+      <label for="token">初始化令牌</label>
+      <input id="token" type="text" placeholder="XXXXXX-XXXXXX-XXXXXX-XXXXXX" spellcheck="false" autocapitalize="off">
+      <p class="hint">形如启动日志中 <code>/setup?token=…</code> 的那一串。</p>
+      <div class="actions">
+        <button class="primary" id="use-token">继续</button>
+        <span class="msg" id="token-msg" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section id="form" class="hidden">
+      <h1>初始化网关</h1>
+      <p class="sub">创建第一个管理员，并配置验证码的发送方式。完成后即可用邮箱验证码登录。</p>
+      <p class="banner" id="mail-notice" hidden></p>
+
+      <h2>管理员</h2>
+      <p class="note">该账号可进入管理后台，并且不受访问策略限制。</p>
+      <label for="admin">管理员邮箱</label>
+      <input id="admin" type="email" placeholder="ops@example.com" spellcheck="false" autocapitalize="off" autofocus>
+
+      <div class="two" style="margin-top:14px">
+        <div>
+          <label for="domain">默认邮箱域</label>
+          <input id="domain" type="text" placeholder="example.com" spellcheck="false" autocapitalize="off">
+          <p class="hint">用于补全只填前缀的邮箱，登录页不会显示。</p>
+        </div>
+        <div>
+          <label for="allowed">允许登录的账号</label>
+          <textarea id="allowed" spellcheck="false" placeholder="*@example.com"></textarea>
+          <p class="hint">支持 <code>*</code> / <code>?</code> 通配，每行一条。</p>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <h2 style="margin-top:22px">邮件发送</h2>
+      <p class="note">验证码由这里配置的 SMTP 服务发送。建议先发一封测试邮件再完成初始化。</p>
+      <div class="two">
+        <div>
+          <label for="smtp-addr">SMTP 服务器</label>
+          <input id="smtp-addr" type="text" placeholder="smtp.example.com:587" spellcheck="false" autocapitalize="off">
+          <p class="hint">587 走 STARTTLS，465 需勾选“直接 TLS”。</p>
+        </div>
+        <div>
+          <label for="smtp-from">发件人地址</label>
+          <input id="smtp-from" type="text" placeholder="no-reply@example.com" spellcheck="false" autocapitalize="off">
+          <p class="hint">建议使用网关专用的发信账号。</p>
+        </div>
+      </div>
+      <div class="two" style="margin-top:14px">
+        <div>
+          <label for="smtp-user">用户名</label>
+          <input id="smtp-user" type="text" autocomplete="off" spellcheck="false" autocapitalize="off">
+        </div>
+        <div>
+          <label for="smtp-pass">密码</label>
+          <input id="smtp-pass" type="password" autocomplete="new-password" placeholder="SMTP 密码">
+        </div>
+      </div>
+      <div class="checks">
+        <label class="check"><input type="checkbox" id="smtp-tls"><span>直接 TLS（端口 465）</span></label>
+        <label class="check"><input type="checkbox" id="smtp-insecure"><span>跳过证书校验（不建议）</span></label>
+      </div>
+
+      <div class="actions">
+        <button class="primary" id="finish">完成初始化</button>
+        <button class="ghost" id="test" type="button">发送测试邮件</button>
+        <span class="msg" id="msg" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <section id="done" class="hidden done">
+      <h1>初始化完成</h1>
+      <p class="sub">管理员：<b id="done-admin"></b></p>
+      <p class="sub">现在可以用该邮箱接收验证码登录。初始化链接在首次管理员登录成功后失效。</p>
+      <p><a href="/login">前往登录 →</a></p>
+    </section>
+  </div>
+</main>
+
+<script>
+(function(){
+  const $ = (id) => document.getElementById(id);
+  let token = document.body.dataset.token || "";
+  const mailNotice = document.body.dataset.mailNotice || "";
+  if (mailNotice){ $("mail-notice").textContent = mailNotice; $("mail-notice").hidden = false; }
+
+  function show(id){
+    ["need-token", "form", "done"].forEach(s => $(s).classList.toggle("hidden", s !== id));
+  }
+  function say(el, text, kind){ el.textContent = text || ""; el.className = "msg" + (kind ? " " + kind : ""); }
+
+  show(token ? "form" : "need-token");
+
+  $("use-token").addEventListener("click", function(){
+    const v = $("token").value.trim();
+    if (!v){ say($("token-msg"), "请输入令牌", "err"); return; }
+    token = v; show("form"); $("admin").focus();
+  });
+  $("token").addEventListener("keydown", e => { if (e.key === "Enter") $("use-token").click(); });
+
+  // Derive the domain and the allowlist from the administrator's address, since
+  // that is what an operator almost always wants.
+  $("admin").addEventListener("blur", function(){
+    const at = this.value.indexOf("@");
+    if (at < 0) return;
+    const domain = this.value.slice(at + 1).trim().toLowerCase();
+    if (!domain) return;
+    if (!$("domain").value.trim()) $("domain").value = domain;
+    if (!$("allowed").value.trim()) $("allowed").value = "*@" + domain;
+    if (!$("smtp-from").value.trim()) $("smtp-from").value = "no-reply@" + domain;
+  });
+
+  function payload(){
+    return {
+      token: token,
+      admin_email: $("admin").value.trim(),
+      default_domain: $("domain").value.trim(),
+      allowed_users: $("allowed").value.split("\n").map(s => s.trim()).filter(Boolean),
+      smtp: {
+        addr: $("smtp-addr").value.trim(),
+        from: $("smtp-from").value.trim(),
+        username: $("smtp-user").value.trim(),
+        implicit_tls: $("smtp-tls").checked,
+        insecure_skip_verify: $("smtp-insecure").checked,
+        password: $("smtp-pass").value,
+        clear_password: false,
+        password_set: false
+      }
+    };
+  }
+
+  async function post(url){
+    const r = await fetch(url, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      credentials: "same-origin", body: JSON.stringify(payload())
+    });
+    let data = {}; try { data = await r.json(); } catch (e) {}
+    return {status: r.status, data};
+  }
+
+  $("test").addEventListener("click", async function(){
+    if (!$("admin").value.trim()){ say($("msg"), "请先填写管理员邮箱", "err"); $("admin").focus(); return; }
+    $("test").disabled = true; say($("msg"), "正在发送测试邮件…");
+    const {data} = await post("/setup/test");
+    $("test").disabled = false;
+    if (!data.ok){ say($("msg"), data.error || "发送失败", "err"); return; }
+    say($("msg"), "测试邮件已发送至 " + (data.sent_to || "管理员邮箱"), "ok");
+  });
+
+  $("finish").addEventListener("click", async function(){
+    if (!$("admin").value.trim()){ say($("msg"), "请填写管理员邮箱", "err"); $("admin").focus(); return; }
+    $("finish").disabled = true; say($("msg"), "正在保存…");
+    const {data} = await post("/setup");
+    $("finish").disabled = false;
+    if (!data.ok){ say($("msg"), data.error || "初始化失败", "err"); return; }
+    $("done-admin").textContent = data.admin || "";
+    show("done");
+  });
+})();
+</script>
+</body>
+</html>
