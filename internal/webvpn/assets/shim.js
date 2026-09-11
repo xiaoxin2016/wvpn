@@ -235,6 +235,52 @@
     } catch (e) {}
   }
 
+  // Frameworks and single sign-on pages often set an absolute href or action
+  // just before navigating, after the observer has already swept. Catching the
+  // event itself is the last chance to keep the navigation on the gateway.
+  document.addEventListener("click", function (e) {
+    try {
+      var el = e.target && e.target.closest && e.target.closest("a[href], area[href]");
+      if (!el) return;
+      var href = el.getAttribute("href");
+      var out = rewrite(href);
+      if (out !== href) el.setAttribute("href", out);
+    } catch (err) {}
+  }, true);
+
+  function fixForm(form, submitter) {
+    if (!form || !form.getAttribute) return;
+    var action = form.getAttribute("action");
+    if (action) {
+      var out = rewrite(action);
+      if (out !== action) form.setAttribute("action", out);
+    }
+    if (submitter && submitter.getAttribute) {
+      var fa = submitter.getAttribute("formaction");
+      if (fa) {
+        var o = rewrite(fa);
+        if (o !== fa) submitter.setAttribute("formaction", o);
+      }
+    }
+  }
+
+  document.addEventListener("submit", function (e) {
+    try {
+      fixForm(e.target, e.submitter);
+    } catch (err) {}
+  }, true);
+
+  ["submit", "requestSubmit"].forEach(function (name) {
+    patch(window.HTMLFormElement && HTMLFormElement.prototype, name, function (orig) {
+      return function (submitter) {
+        try {
+          fixForm(this, submitter);
+        } catch (e) {}
+        return orig.apply(this, arguments);
+      };
+    });
+  });
+
   // ---- history -------------------------------------------------------------
 
   ["pushState", "replaceState"].forEach(function (name) {

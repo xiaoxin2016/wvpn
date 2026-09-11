@@ -454,8 +454,8 @@ func TestAdminSMTPConfig(t *testing.T) {
 	status, out := post(map[string]any{
 		"addr": "smtp.example.com:587", "from": "no-reply@example.com",
 		"username": "gateway", "password": "s3cret",
-		"implicit_tls": false, "insecure_skip_verify": false,
-		"clear_password": false, "password_set": false,
+		"tls_mode": "auto", "allow_plaintext_auth": false, "helo": "",
+		"insecure_skip_verify": false, "clear_password": false, "password_set": false,
 	})
 	if status != http.StatusOK || out["ok"] != true {
 		t.Fatalf("saving SMTP: %d %v", status, out)
@@ -484,21 +484,23 @@ func TestAdminSMTPConfig(t *testing.T) {
 	// Saving with an empty password keeps the stored one.
 	if status, out = post(map[string]any{
 		"addr": "smtp.example.com:465", "from": "no-reply@example.com",
-		"username": "gateway", "password": "", "implicit_tls": true,
-		"insecure_skip_verify": false, "clear_password": false, "password_set": true,
+		"username": "gateway", "password": "", "tls_mode": "implicit",
+		"allow_plaintext_auth": false, "helo": "", "insecure_skip_verify": false,
+		"clear_password": false, "password_set": true,
 	}); status != http.StatusOK {
 		t.Fatalf("second save: %d %v", status, out)
 	}
 	got := m.store.Get().SMTP
-	if got.Password != "s3cret" || !got.ImplicitTLS || got.Addr != "smtp.example.com:465" {
+	if got.Password != "s3cret" || got.Mode() != store.TLSImplicit || got.Addr != "smtp.example.com:465" {
 		t.Fatalf("merge lost or mangled fields: %+v", got)
 	}
 
 	// Clearing is explicit.
 	if status, out = post(map[string]any{
 		"addr": "smtp.example.com:465", "from": "no-reply@example.com",
-		"username": "gateway", "password": "", "implicit_tls": true,
-		"insecure_skip_verify": false, "clear_password": true, "password_set": true,
+		"username": "gateway", "password": "", "tls_mode": "implicit",
+		"allow_plaintext_auth": false, "helo": "", "insecure_skip_verify": false,
+		"clear_password": true, "password_set": true,
 	}); status != http.StatusOK {
 		t.Fatalf("clearing password: %d %v", status, out)
 	}
@@ -584,8 +586,9 @@ func TestSetupFlow(t *testing.T) {
 		"allowed_users":  []string{"*@corp.example"},
 		"smtp": map[string]any{
 			"addr": "smtp.corp.example:587", "from": "no-reply@corp.example",
-			"username": "", "password": "", "implicit_tls": false,
-			"insecure_skip_verify": false, "clear_password": false, "password_set": false,
+			"username": "", "password": "", "tls_mode": "auto",
+			"allow_plaintext_auth": false, "helo": "", "insecure_skip_verify": false,
+			"clear_password": false, "password_set": false,
 		},
 	}
 	if status, out := postJSON(t, client, srv.URL+"/setup", body); status != http.StatusForbidden {
@@ -651,5 +654,45 @@ func TestSetupTokensDiffer(t *testing.T) {
 	}
 	if len(a) != 27 { // 24 base32 characters in four groups
 		t.Errorf("token %q has length %d", a, len(a))
+	}
+}
+
+func TestClientIPBehindAProxy(t *testing.T) {
+	m, _ := newManager(t, store.Config{})
+
+	// nginx on the same host: the peer is loopback, so its headers are the
+	// only source of the real address.
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "127.0.0.1:5000"
+	req.Header.Set("X-Real-IP", "203.0.113.9")
+	if got := m.clientIP(req); got != "203.0.113.9" {
+		t.Errorf("clientIP behind nginx = %q", got)
+	}
+
+	req.Header.Del("X-Real-IP")
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+	if got := m.clientIP(req); got != "203.0.113.9" {
+		t.Errorf("clientIP from X-Forwarded-For = %q", got)
+	}
+
+	// A client that reaches the gateway directly cannot claim another address.
+	direct := httptest.NewRequest(http.MethodGet, "/", nil)
+	direct.RemoteAddr = "198.51.100.7:40000"
+	direct.Header.Set("X-Real-IP", "127.0.0.1")
+	if got := m.clientIP(direct); got != "198.51.100.7" {
+		t.Errorf("a remote client spoofed its address: %q", got)
+	}
+
+	// Unless the operator says the headers can be believed from anywhere.
+	m.opts.TrustProxyHeaders = true
+	if got := m.clientIP(direct); got != "127.0.0.1" {
+		t.Errorf("clientIP with -trust-proxy-headers = %q", got)
+	}
+
+	// With no headers at all, the peer stands.
+	bare := httptest.NewRequest(http.MethodGet, "/", nil)
+	bare.RemoteAddr = "127.0.0.1:5000"
+	if got := m.clientIP(bare); got != "127.0.0.1" {
+		t.Errorf("clientIP without headers = %q", got)
 	}
 }

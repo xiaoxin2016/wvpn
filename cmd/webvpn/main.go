@@ -65,7 +65,9 @@ type config struct {
 	smtpUser     string
 	smtpPass     string
 	smtpFrom     string
-	smtpImplicit bool
+	smtpTLSMode  string
+	smtpPlain    bool
+	smtpHELO     string
 	smtpInsecure bool
 	mailSubject  string
 
@@ -106,11 +108,17 @@ func main() {
 	flag.StringVar(&c.smtpUser, "smtp-user", "", "SMTP username")
 	flag.StringVar(&c.smtpPass, "smtp-pass", "", "SMTP password; prefer WEBVPN_SMTP_PASS")
 	flag.StringVar(&c.smtpFrom, "smtp-from", "", "envelope sender address")
-	flag.BoolVar(&c.smtpImplicit, "smtp-implicit-tls", false, "dial SMTP over TLS directly (port 465) instead of STARTTLS")
+	flag.StringVar(&c.smtpTLSMode, "smtp-tls-mode", store.TLSAuto,
+		"SMTP transport security: auto (STARTTLS when offered) | require | none | implicit (direct TLS, port 465)")
+	flag.BoolVar(&c.smtpPlain, "smtp-allow-plaintext-auth", false,
+		"allow SMTP AUTH over an unencrypted connection, as an internal relay on port 25 may require")
+	flag.StringVar(&c.smtpHELO, "smtp-helo", "", "name announced in EHLO; some relays reject the default")
 	flag.BoolVar(&c.smtpInsecure, "smtp-insecure", false, "skip SMTP certificate verification")
 	flag.StringVar(&c.mailSubject, "mail-subject", "", "subject line of the code e-mail")
 
-	flag.BoolVar(&c.trustForwarded, "trust-forwarded-for", false, "read the client IP from X-Forwarded-For (only behind your own proxy)")
+	flag.BoolVar(&c.trustForwarded, "trust-proxy-headers", false,
+		"believe X-Real-IP / X-Forwarded-For from any peer; they are honoured from loopback peers regardless")
+	flag.BoolVar(&c.trustForwarded, "trust-forwarded-for", false, "deprecated alias of -trust-proxy-headers")
 	showVersion := flag.Bool("version", false, "print build information and exit")
 	flag.Parse()
 
@@ -131,6 +139,12 @@ func main() {
 
 func run(c config, logger *log.Logger) error {
 	serveTLS := c.tlsCert != "" && c.tlsKey != ""
+
+	switch c.smtpTLSMode {
+	case store.TLSAuto, store.TLSRequire, store.TLSNone, store.TLSImplicit:
+	default:
+		return fmt.Errorf("unknown -smtp-tls-mode %q (want auto, require, none or implicit)", c.smtpTLSMode)
+	}
 
 	codec, err := buildCodec(c, serveTLS)
 	if err != nil {
@@ -311,7 +325,7 @@ func buildAuth(c config, cfg *store.Store, setupToken string, serveTLS bool, log
 		CookieDomain:      cookieDomain,
 		LoginOrigin:       loginOrigin,
 		NextDomain:        nextDomain,
-		TrustForwardedFor: c.trustForwarded,
+		TrustProxyHeaders: c.trustForwarded,
 		AdminNotice:       adminNotice(c),
 		Logger:            logger,
 	})
@@ -326,6 +340,9 @@ func warn(c config, logger *log.Logger) {
 	}
 	if c.insecureTLS {
 		logger.Print("warning: -insecure-tls disables upstream certificate verification")
+	}
+	if c.smtpPlain {
+		logger.Print("warning: -smtp-allow-plaintext-auth sends the SMTP password over an unencrypted connection")
 	}
 	if c.urlMode == "wrd" && c.urlKey == webvpn.DefaultWRDKey {
 		logger.Print("warning: -url-mode wrd is using the well-known default key; target hostnames are readable by anyone")
@@ -461,7 +478,9 @@ func buildMailer(c config, cfg *store.Store, awaitingSetup bool, logger *log.Log
 			From:               from,
 			Username:           c.smtpUser,
 			Password:           c.smtpPass,
-			ImplicitTLS:        c.smtpImplicit,
+			TLSMode:            c.smtpTLSMode,
+			AllowPlaintextAuth: c.smtpPlain,
+			HELO:               c.smtpHELO,
 			InsecureSkipVerify: c.smtpInsecure,
 		}
 	}

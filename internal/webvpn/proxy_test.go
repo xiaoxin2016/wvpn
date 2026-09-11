@@ -16,7 +16,10 @@ func originServer(t *testing.T) *httptest.Server {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		http.SetCookie(w, &http.Cookie{Name: "sid", Value: "abc", Path: "/", Domain: "origin.test", Secure: true})
+		// A value Go's own cookie writer would mangle, and a Secure flag the
+		// gateway has to drop because this leg is plain HTTP.
+		w.Header().Add("Set-Cookie", "sid=abc; Path=/; Secure; HttpOnly")
+		w.Header().Add("Set-Cookie", "name=张三 与 空格; Path=/")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(w, `<html><head><title>o</title></head><body>`+
 			`<a href="/page2">two</a><img src="img/x.png"></body></html>`)
@@ -113,12 +116,25 @@ func TestProxyRewritesDocument(t *testing.T) {
 
 	// The origin's cookie is re-scoped onto the gateway's path space, loses its
 	// Domain, and drops Secure because this gateway is plain HTTP.
-	sc := resp.Header.Get("Set-Cookie")
-	if !strings.Contains(sc, "Path=/p/http/"+host+"/") {
-		t.Errorf("cookie path not rewritten: %q", sc)
+	cookies := resp.Header.Values("Set-Cookie")
+	if len(cookies) != 2 {
+		t.Fatalf("Set-Cookie headers = %q", cookies)
 	}
-	if strings.Contains(sc, "Domain=") || strings.Contains(sc, "Secure") {
-		t.Errorf("cookie kept Domain or Secure over plain HTTP: %q", sc)
+	for _, sc := range cookies {
+		if !strings.Contains(sc, "Path=/p/http/"+host+"/") {
+			t.Errorf("cookie path not rewritten: %q", sc)
+		}
+		if strings.Contains(sc, "Domain=") || strings.Contains(sc, "Secure") {
+			t.Errorf("cookie kept Domain or Secure over plain HTTP: %q", sc)
+		}
+	}
+	// The payload has to survive byte for byte: Go's cookie parser would have
+	// dropped this one outright.
+	if !strings.Contains(cookies[1], "name=张三 与 空格") {
+		t.Errorf("cookie value was mangled: %q", cookies[1])
+	}
+	if !strings.Contains(cookies[0], "HttpOnly") {
+		t.Errorf("HttpOnly was lost: %q", cookies[0])
 	}
 }
 

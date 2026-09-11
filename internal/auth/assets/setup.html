@@ -49,7 +49,7 @@
   h2:first-of-type{margin-top:0}
   .note{margin:0 0 16px; color:var(--faint); font-size:12.5px}
   label{display:block; font-size:12.5px; font-weight:560; color:var(--muted); margin:14px 0 7px}
-  input[type=text], input[type=email], input[type=password], textarea{
+  input[type=text], input[type=email], input[type=password], textarea, select{
     width:100%; border:1px solid var(--border); border-radius:10px; background:var(--bg);
     color:var(--fg); font:inherit; padding:10px 12px; outline:0;
     transition:border-color .15s, box-shadow .15s;
@@ -149,16 +149,33 @@
         <div>
           <label for="smtp-user">用户名</label>
           <input id="smtp-user" type="text" autocomplete="off" spellcheck="false" autocapitalize="off">
+          <p class="hint">留空表示不做认证（内网中继常见）。</p>
         </div>
         <div>
           <label for="smtp-pass">密码</label>
           <input id="smtp-pass" type="password" autocomplete="new-password" placeholder="SMTP 密码">
         </div>
       </div>
+      <div class="two" style="margin-top:14px">
+        <div>
+          <label for="smtp-tls-mode">传输加密</label>
+          <select id="smtp-tls-mode">
+            <option value="auto">自动：支持 STARTTLS 就升级（默认）</option>
+            <option value="require">必须加密</option>
+            <option value="none">不加密（仅限可信内网）</option>
+            <option value="implicit">直接 TLS（端口 465）</option>
+          </select>
+        </div>
+        <div>
+          <label for="smtp-helo">EHLO 名称（可选）</label>
+          <input id="smtp-helo" type="text" placeholder="gateway.corp.local" spellcheck="false" autocapitalize="off">
+        </div>
+      </div>
       <div class="checks">
-        <label class="check"><input type="checkbox" id="smtp-tls"><span>直接 TLS（端口 465）</span></label>
+        <label class="check"><input type="checkbox" id="smtp-plain"><span>允许明文认证</span></label>
         <label class="check"><input type="checkbox" id="smtp-insecure"><span>跳过证书校验（不建议）</span></label>
       </div>
+      <p class="hint" style="margin-top:10px">未加密的连接上默认不会发送账号密码；25 端口的中继若必须认证，请勾选“允许明文认证”。</p>
 
       <div class="actions">
         <button class="primary" id="finish">完成初始化</button>
@@ -219,7 +236,9 @@
         addr: $("smtp-addr").value.trim(),
         from: $("smtp-from").value.trim(),
         username: $("smtp-user").value.trim(),
-        implicit_tls: $("smtp-tls").checked,
+        tls_mode: $("smtp-tls-mode").value,
+        allow_plaintext_auth: $("smtp-plain").checked,
+        helo: $("smtp-helo").value.trim(),
         insecure_skip_verify: $("smtp-insecure").checked,
         password: $("smtp-pass").value,
         clear_password: false,
