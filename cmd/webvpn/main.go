@@ -48,6 +48,7 @@ type config struct {
 	denyHosts    string
 	allowPrivate bool
 	insecureTLS  bool
+	jsRewrite    string
 	maxRewrite   int64
 	dialTimeout  time.Duration
 	respTimeout  time.Duration
@@ -91,6 +92,8 @@ func main() {
 	flag.StringVar(&c.denyHosts, "deny", "", "hard denylist of target hosts (suffix match), applied on top of the console's site policy")
 	flag.BoolVar(&c.allowPrivate, "allow-private", false, "allow targets that resolve to loopback/private/link-local addresses")
 	flag.BoolVar(&c.insecureTLS, "insecure-tls", false, "skip certificate verification for upstream HTTPS")
+	flag.StringVar(&c.jsRewrite, "js-rewrite", "related",
+		"rewrite absolute URLs inside scripts and JSON: off | related (same registrable domain) | all")
 	flag.Int64Var(&c.maxRewrite, "max-rewrite-bytes", 8<<20, "largest response body that gets rewritten")
 	flag.DurationVar(&c.dialTimeout, "dial-timeout", 10*time.Second, "upstream dial timeout")
 	flag.DurationVar(&c.respTimeout, "response-timeout", 30*time.Second, "upstream response header timeout")
@@ -150,6 +153,10 @@ func run(c config, logger *log.Logger) error {
 	if err != nil {
 		return err
 	}
+	jsScope, err := webvpn.ParseJSScope(c.jsRewrite)
+	if err != nil {
+		return err
+	}
 
 	// One JSON file holds everything an admin can change at runtime: who may
 	// sign in, which sites are reachable, and the portal's bookmarks.
@@ -177,6 +184,7 @@ func run(c config, logger *log.Logger) error {
 		DialTimeout:           c.dialTimeout,
 		ResponseHeaderTimeout: c.respTimeout,
 		InsecureTLS:           c.insecureTLS,
+		JSScope:               jsScope,
 		Portal: webvpn.Portal{
 			Name:      c.portal,
 			Bookmarks: func() []webvpn.Category { return categories(cfg) },

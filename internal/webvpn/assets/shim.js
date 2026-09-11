@@ -281,6 +281,37 @@
     });
   });
 
+  // ---- navigation ----------------------------------------------------------
+
+  // `location.href = "https://sso.example/"` cannot be intercepted: the
+  // property is unforgeable, so no patch can see the assignment. The Navigation
+  // API sees the navigation it produces, though — including the cross-origin
+  // ones, which report canIntercept:false but are still cancelable. Cancelling
+  // and re-issuing the navigation against the gateway is what keeps a single
+  // sign-on hop from walking the browser out of the tunnel.
+  if (window.navigation && navigation.addEventListener) {
+    navigation.addEventListener("navigate", function (e) {
+      try {
+        if (!e.cancelable || e.navigationType === "traverse") return;
+        var url = e.destination && e.destination.url;
+        if (!url) return;
+        var mapped = rewrite(url);
+        if (typeof mapped !== "string" || mapped === url) return;
+        // Same-origin already: nothing to correct.
+        if (new URL(url, location.href).origin === location.origin) return;
+
+        e.preventDefault();
+        var go = function () {
+          if (navigation.navigate) navigation.navigate(mapped);
+          else location.assign(mapped);
+        };
+        // Starting a navigation from inside the handler is allowed, but
+        // deferring keeps this out of the way of the cancelled one.
+        setTimeout(go, 0);
+      } catch (err) {}
+    });
+  }
+
   // ---- history -------------------------------------------------------------
 
   ["pushState", "replaceState"].forEach(function (name) {

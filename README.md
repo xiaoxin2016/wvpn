@@ -22,6 +22,8 @@
   跨主机的 SSO 跳转链路可以走通；Cookie 一律按原始字节透传，不经 Go 的 cookie 序列化器。
 - **内容改写**：HTML（`href/src/srcset/action/formaction/poster/data/xlink:href/style/<base>/meta refresh` 等）、
   CSS（`url()` / `@import`）、`Location` 与 `Link` 响应头、`Set-Cookie` 作用域。
+- **跳转不会逃出隧道**：连 `location.href = "https://其他主机/"` 这种无法被补丁拦截的赋值式跳转，
+  也会被 Navigation API 取消并改走网关；不支持该 API 的浏览器由脚本内绝对地址改写兜底。
 - **运行期补丁**（注入的 `shim.js`）：`fetch`、`XMLHttpRequest`、`WebSocket`、`EventSource`、
   `sendBeacon`、`window.open`、`setAttribute`、元素 `src/href` 属性写入、`history.pushState/replaceState`，
   以及针对 `innerHTML` 生成节点的 `MutationObserver` 兜底。
@@ -117,6 +119,7 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 | `-allow` / `-deny` | — | 目标主机白/黑名单，逗号分隔，按域名后缀匹配。这是**硬性边界**，管理后台无法放宽 |
 | `-allow-private` | `false` | 允许访问环回/RFC1918/CGNAT 地址（内网网关通常需要开启，见安全须知）。链路本地与组播地址始终拒绝 |
 | `-insecure-tls` | `false` | 不校验上游证书 |
+| `-js-rewrite` | `related` | 脚本与 JSON 中绝对地址的改写范围：`off` / `related`（同注册域）/ `all` |
 | `-max-rewrite-bytes` | `8MiB` | 超过此大小的响应体不改写，直接透传 |
 | `-no-auth` | `false` | 关闭登录（仅供开发） |
 | `-config` | `webvpn-config.json` | 管理后台可写的策略文件 |
@@ -234,10 +237,36 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr :443 \
 - `Domain` 与目标主机无关的 Cookie 被丢弃——真实浏览器同样会拒绝。
 - 关闭登录（`-no-auth`）时没有会话可挂，域级 Cookie 退回浏览器路径隔离的老行为。
 
-**已知限制**：页面若用 `location.href = "https://other.intra.com/..."` 这类**绝对地址**跳转，
-浏览器会直接离开网关去访问真实域名——JS 无法拦截对 `location.href` 的赋值。网关已覆盖
-`location.assign/replace`、`window.open`、`history.pushState`、表单提交与链接点击（捕获阶段），
-但上述赋值形式属于无解项；改用子域名模式可以规避（那时"真实域名"就是网关的子域）。
+### 赋值式跳转
+
+`location.href = "https://sso.intra.com/"` 是拦不住的：该属性是 unforgeable 的，任何补丁都看不到这次赋值。
+但**导航本身**能看到——Navigation API 的 `navigate` 事件对跨源导航同样触发，实测 `cancelable: true`
+（`canIntercept` 为 false 不影响取消）。所以注入脚本会取消这次导航，改用网关地址重新发起：
+
+```
+location.href = "http://sso.intra.com/login"
+   → navigate 事件（cancelable）→ preventDefault()
+   → navigation.navigate("/p/http/sso.intra.com/login")
+```
+
+覆盖范围：Chromium 102+（Chrome / Edge）。Firefox 与 Safari 尚未提供该 API，因此还有一层兜底——
+**在脚本执行之前就把地址改掉**：网关会改写脚本与 JSON 响应（含 HTML 内联脚本）中的绝对地址，
+默认只改与当前站点**同注册域**的主机（`-js-rewrite related`），这正是 SSO 跳转发生的范围；
+`all` 改写全部可代理地址，`off` 完全不动脚本。
+
+之所以默认只改同域：脚本里的绝对地址未必是导航目标，也可能是用来比较的字符串，改写范围越大误伤越多。
+只替换 `scheme://host` 部分，其后路径原样保留。
+
+两条路径实测（A/B 对照，浏览器真实执行）：
+
+| | 赋值式跳转后所在位置 |
+| --- | --- |
+| v0.3.0（无本次修复） | `http://app.corp.example:9101/` —— **已离开网关** |
+| 本版本（`-js-rewrite off`，仅靠 Navigation API） | `http://gw/p/http/app.corp.example:9101/` —— 仍在隧道内 |
+| 本版本（`-js-rewrite related`） | 脚本里的地址在执行前已改为 `/p/http/sso.corp.example:9102/login?back=` |
+
+仍然无解的情形：非 Chromium 浏览器 + 地址在运行时拼接（脚本里没有可改写的字面量）。
+这种站点建议用子域名模式，那时"真实域名"本身就是网关的子域。
 
 ## 访问策略
 
@@ -364,6 +393,7 @@ go test ./internal/webvpn -bench BenchmarkHTMLRewrite -run '^$'
 SMTP 配置（校验、密码不回显、留空沿用、显式清除、测试邮件仅发给管理员本人）、
 自签名证书流程（询问页、指纹固定、伪造确认被拒、子资源不渲染询问页、返回地址校验）、
 Cookie 原始字节保全（非 ASCII / 空格 / 逗号 / 引号值）、域级 Cookie 的服务端回放与会话隔离、
+脚本内绝对地址改写（同域命中、他域不动、JSON 转义斜杠、端口、内联脚本不被破坏）、
 SMTP 传输组合（25 端口无认证、明文认证默认拒绝且提示开关、AUTH LOGIN、CRAM-MD5 优先、必须加密）、
 反向代理下的客户端 IP 识别（环回对端读 X-Real-IP，远端客户端无法伪造）、
 访问策略（黑白名单在主机名与解析地址两个阶段的判定）、端到端代理（含 gzip、跳转、

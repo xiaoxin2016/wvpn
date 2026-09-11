@@ -2,20 +2,54 @@ package webvpn
 
 import (
 	"bytes"
+	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
 
 	"golang.org/x/net/html"
+	"golang.org/x/net/publicsuffix"
 )
 
 // schemeRe matches an explicit scheme at the start of a URL reference.
 var schemeRe = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*:`)
 
+// JSScope says which absolute URLs inside scripts and JSON payloads are
+// rewritten. Markup can be rewritten exactly, because every URL in it is a URL;
+// a script is just text, where an absolute URL may be a navigation target or
+// may be a string someone compares against.
+type JSScope int
+
+const (
+	// JSOff leaves scripts alone.
+	JSOff JSScope = iota
+	// JSRelated rewrites only hosts in the same registrable domain as the page
+	// being viewed — where single sign-on hops happen, and where the user is
+	// already tunnelling.
+	JSRelated
+	// JSAll rewrites every proxyable absolute URL.
+	JSAll
+)
+
+// ParseJSScope turns a flag value into a scope.
+func ParseJSScope(v string) (JSScope, error) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "off", "none":
+		return JSOff, nil
+	case "", "related":
+		return JSRelated, nil
+	case "all":
+		return JSAll, nil
+	}
+	return JSOff, fmt.Errorf("webvpn: unknown script rewriting scope %q (want off, related or all)", v)
+}
+
 // Rewriter turns the URL references inside a document into gateway references
 // using a Codec.
 type Rewriter struct {
 	Codec Codec
+	// Scope bounds the rewriting of absolute URLs inside scripts.
+	Scope JSScope
 }
 
 // Ref resolves a URL reference found in a document against base and maps it into
@@ -82,6 +116,50 @@ func (rw Rewriter) Srcset(v string, base *url.URL) string {
 		b.WriteString(v[ds:i])
 	}
 	return b.String()
+}
+
+// jsOriginRe matches the scheme-and-host part of an absolute URL as it appears
+// in script or JSON text, including the escaped form JSON uses (https:\/\/host).
+var jsOriginRe = regexp.MustCompile(`(?i)\b(https?):(\\?/\\?/)([a-z0-9._-]+(?::[0-9]{1,5})?)`)
+
+// JS rewrites the absolute URLs a script would navigate to or fetch.
+//
+// This is the fallback for what no patch can intercept: assigning to
+// location.href is unforgeable, so on a browser without the Navigation API the
+// only chance to keep such a navigation inside the tunnel is to have rewritten
+// the address before the script ever runs. Only the scheme and host are
+// replaced; whatever follows is already a path.
+func (rw Rewriter) JS(src string, base *url.URL) string {
+	if rw.Scope == JSOff || base == nil || src == "" {
+		return src
+	}
+	return jsOriginRe.ReplaceAllStringFunc(src, func(m string) string {
+		g := jsOriginRe.FindStringSubmatch(m)
+		scheme, host := strings.ToLower(g[1]), g[3]
+		if rw.Scope == JSRelated && !relatedHosts(base.Hostname(), host) {
+			return m
+		}
+		enc := rw.Codec.Encode(&url.URL{Scheme: scheme, Host: host})
+		if enc == "" {
+			return m
+		}
+		return strings.TrimSuffix(enc, "/")
+	})
+}
+
+// relatedHosts reports whether two hosts belong to the same registrable domain,
+// which is the boundary a single sign-on domain lives inside.
+func relatedHosts(a, b string) bool {
+	a, b = hostOnly(a), hostOnly(b)
+	if a == b {
+		return true
+	}
+	da, erra := publicsuffix.EffectiveTLDPlusOne(a)
+	db, errb := publicsuffix.EffectiveTLDPlusOne(b)
+	if erra != nil || errb != nil {
+		return false // an address or a single label: only an exact match counts
+	}
+	return da == db
 }
 
 var (
@@ -256,7 +334,7 @@ func (rw Rewriter) HTML(src []byte, base *url.URL, inject string) []byte {
 
 	z := html.NewTokenizer(bytes.NewReader(src))
 	injected := inject == ""
-	inStyle := false
+	inStyle, inScript := false, false
 
 	for {
 		tt := z.Next()
@@ -270,6 +348,7 @@ func (rw Rewriter) HTML(src []byte, base *url.URL, inject string) []byte {
 			tok := z.Token()
 			name := tok.Data
 			inStyle = tt == html.StartTagToken && name == "style"
+			inScript = tt == html.StartTagToken && name == "script"
 
 			if name == "base" {
 				if href, ok := baseHref(&tok); ok {
@@ -297,13 +376,18 @@ func (rw Rewriter) HTML(src []byte, base *url.URL, inject string) []byte {
 			}
 
 		case html.EndTagToken:
-			inStyle = false
+			inStyle, inScript = false, false
 			out.Write(raw)
 
 		case html.TextToken:
-			if inStyle {
+			switch {
+			case inStyle:
 				out.WriteString(rw.CSS(string(raw), base))
-			} else {
+			case inScript:
+				// Inline scripts are where a login page usually decides where
+				// to send the browser next.
+				out.WriteString(rw.JS(string(raw), base))
+			default:
 				out.Write(raw)
 			}
 

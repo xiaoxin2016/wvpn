@@ -163,3 +163,89 @@ func BenchmarkHTMLRewrite(b *testing.B) {
 		rw.HTML(src, base, "")
 	}
 }
+
+func TestJSRewriteRelated(t *testing.T) {
+	rw := Rewriter{Codec: PlainCodec{}, Scope: JSRelated}
+	base := mustURL(t, "https://app.corp.example/portal")
+
+	cases := []struct{ in, want string }{
+		// The single sign-on hop: same registrable domain, so it is rewritten.
+		{`location.href = "https://sso.corp.example/login?back=x"`,
+			`location.href = "/p/https/sso.corp.example/login?back=x"`},
+		// JSON escapes its slashes; the escaped form has to match too.
+		{`{"url":"https:\/\/sso.corp.example\/login"}`,
+			`{"url":"/p/https/sso.corp.example\/login"}`},
+		// A port is part of the host.
+		{`fetch("http://api.corp.example:8443/v1")`,
+			`fetch("/p/http/api.corp.example:8443/v1")`},
+		// The page's own host, trivially related.
+		{`"https://app.corp.example/x"`, `"/p/https/app.corp.example/x"`},
+		// Somebody else's domain is left alone: it may be a string the page
+		// compares against, and the user is not tunnelling to it.
+		{`"https://cdn.other.example/lib.js"`, `"https://cdn.other.example/lib.js"`},
+		{`"ftp://files.corp.example/x"`, `"ftp://files.corp.example/x"`},
+	}
+	for _, tc := range cases {
+		if got := rw.JS(tc.in, base); got != tc.want {
+			t.Errorf("JS(%q)\n got %q\nwant %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestJSRewriteScopes(t *testing.T) {
+	base := mustURL(t, "https://app.corp.example/")
+	src := `a="https://sso.corp.example/x"; b="https://cdn.other.example/y"`
+
+	off := Rewriter{Codec: PlainCodec{}, Scope: JSOff}
+	if got := off.JS(src, base); got != src {
+		t.Errorf("JSOff changed the script: %q", got)
+	}
+
+	all := Rewriter{Codec: PlainCodec{}, Scope: JSAll}
+	got := all.JS(src, base)
+	for _, want := range []string{`"/p/https/sso.corp.example/x"`, `"/p/https/cdn.other.example/y"`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("JSAll missing %q in %q", want, got)
+		}
+	}
+}
+
+func TestRelatedHosts(t *testing.T) {
+	cases := []struct {
+		a, b string
+		want bool
+	}{
+		{"app.corp.example", "sso.corp.example", true},
+		{"corp.example", "sso.corp.example", true},
+		{"app.corp.example", "app.corp.example", true},
+		{"app.corp.example:8443", "app.corp.example", true},
+		{"app.corp.example", "corp.other", false},
+		{"10.0.0.1", "10.0.0.2", false},
+		{"10.0.0.1", "10.0.0.1", true},
+		{"intranet", "intranet", true},
+		{"a.corp.local", "b.corp.local", true},
+	}
+	for _, tc := range cases {
+		if got := relatedHosts(tc.a, tc.b); got != tc.want {
+			t.Errorf("relatedHosts(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
+		}
+	}
+}
+
+func TestHTMLRewritesInlineScripts(t *testing.T) {
+	rw := Rewriter{Codec: PlainCodec{}, Scope: JSRelated}
+	base := mustURL(t, "https://app.corp.example/")
+	in := `<html><head><script>if (!token) location.href = "https://sso.corp.example/login";</script></head>` +
+		`<body><script>var re = /a<b/; x("</b>"); var cdn = "https://cdn.other.example/l.js";</script></body></html>`
+	out := string(rw.HTML([]byte(in), base, ""))
+
+	if !strings.Contains(out, `location.href = "/p/https/sso.corp.example/login"`) {
+		t.Errorf("inline navigation was not rewritten: %s", out)
+	}
+	// Everything else about script bodies still survives untouched.
+	for _, want := range []string{`var re = /a<b/;`, `x("</b>");`, `"https://cdn.other.example/l.js"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("script body was damaged, missing %q: %s", want, out)
+		}
+	}
+}
