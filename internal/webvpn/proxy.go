@@ -39,6 +39,8 @@ type Options struct {
 	ResponseHeaderTimeout time.Duration
 	// InsecureTLS disables upstream certificate verification.
 	InsecureTLS bool
+	// JSScope bounds the rewriting of absolute URLs inside scripts and JSON.
+	JSScope JSScope
 
 	// SessionCookie names the gateway's own session cookie, which must never
 	// be forwarded to a proxied origin.
@@ -126,7 +128,7 @@ func New(opts Options) *Handler {
 	h := &Handler{
 		opts:  opts,
 		codec: opts.Codec,
-		rw:    Rewriter{Codec: opts.Codec},
+		rw:    Rewriter{Codec: opts.Codec, Scope: opts.JSScope},
 		log:   opts.Logger,
 		trust: newTrustStore(),
 		jars:  newSessionJars(),
@@ -451,6 +453,9 @@ func (h *Handler) cookiePath(target *url.URL, path string) string {
 
 func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
 	kind := bodyKind(resp.Header.Get("Content-Type"))
+	if kind == bodyScript && h.rw.Scope == JSOff {
+		kind = bodyOther
+	}
 	if kind == bodyOther || resp.Body == nil || resp.StatusCode == http.StatusNoContent {
 		return nil
 	}
@@ -492,6 +497,8 @@ func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
 		out = h.rw.HTML(buf, target, h.inject(target))
 	case bodyCSS:
 		out = []byte(h.rw.CSS(string(buf), target))
+	case bodyScript:
+		out = []byte(h.rw.JS(string(buf), target))
 	}
 
 	resp.Body = io.NopCloser(bytes.NewReader(out))
@@ -521,6 +528,7 @@ const (
 	bodyOther bodyType = iota
 	bodyHTML
 	bodyCSS
+	bodyScript
 )
 
 func bodyKind(contentType string) bodyType {
@@ -533,6 +541,12 @@ func bodyKind(contentType string) bodyType {
 		return bodyHTML
 	case "text/css":
 		return bodyCSS
+	case "application/javascript", "text/javascript", "application/x-javascript",
+		"module", "application/json", "text/json":
+		return bodyScript
+	}
+	if strings.HasSuffix(mt, "+json") {
+		return bodyScript
 	}
 	return bodyOther
 }

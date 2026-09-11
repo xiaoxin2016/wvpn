@@ -2,6 +2,7 @@ package webvpn
 
 import (
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -35,6 +36,13 @@ func originServer(t *testing.T) *httptest.Server {
 
 	mux.HandleFunc("/redirect", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/page2?q=1", http.StatusFound)
+	})
+
+	mux.HandleFunc("/app.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/javascript")
+		// The escape hatch no patch can intercept, written the way a login
+		// script writes it.
+		fmt.Fprintf(w, `location.href = "http://%s/next"; var cdn = "https://cdn.other.example/l.js";`, r.Host)
 	})
 
 	mux.HandleFunc("/echo", func(w http.ResponseWriter, r *http.Request) {
@@ -357,5 +365,29 @@ func TestAdminBypassesSitePolicy(t *testing.T) {
 	resp, _ = get(t, client, locked.URL+"/p/http/"+host+"/", nil)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("admin bypassed the command-line denylist: %d", resp.StatusCode)
+	}
+}
+
+func TestProxyRewritesScriptBodies(t *testing.T) {
+	origin := originServer(t)
+	host := originHost(t, origin)
+	gw, client := gatewayFor(t, Options{JSScope: JSRelated})
+
+	resp, body := get(t, client, gw.URL+"/p/http/"+host+"/app.js", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if !strings.Contains(body, `location.href = "/p/http/`+host+`/next"`) {
+		t.Errorf("script navigation was not rewritten: %s", body)
+	}
+	if !strings.Contains(body, `"https://cdn.other.example/l.js"`) {
+		t.Errorf("an unrelated host was rewritten: %s", body)
+	}
+
+	// With script rewriting off, the body is passed through untouched.
+	plain, client := gatewayFor(t, Options{})
+	_, body = get(t, client, plain.URL+"/p/http/"+host+"/app.js", nil)
+	if !strings.Contains(body, `location.href = "http://`+host+`/next"`) {
+		t.Errorf("JSOff still rewrote the script: %s", body)
 	}
 }
