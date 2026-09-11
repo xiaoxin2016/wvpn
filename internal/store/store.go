@@ -324,12 +324,18 @@ var (
 // NormalizeEmail turns what the user typed into a full address, applying the
 // configured default domain to a bare local part.
 func (s *Store) NormalizeEmail(input string) (string, error) {
+	return s.NormalizeEmailWith(input, s.Get().DefaultDomain)
+}
+
+// NormalizeEmailWith is NormalizeEmail against a domain that is not (yet) the
+// stored one, which the first-run setup form needs.
+func (s *Store) NormalizeEmailWith(input, domain string) (string, error) {
 	v := strings.ToLower(strings.TrimSpace(input))
 	if v == "" {
 		return "", errors.New("请输入邮箱地址")
 	}
 	if !strings.Contains(v, "@") {
-		domain := s.Get().DefaultDomain
+		domain = strings.ToLower(strings.Trim(strings.TrimSpace(domain), "@"))
 		if domain == "" {
 			return "", errors.New("请输入完整邮箱地址")
 		}

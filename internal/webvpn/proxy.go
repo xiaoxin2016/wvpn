@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"io"
@@ -59,6 +58,8 @@ type Handler struct {
 	rw    Rewriter
 	rp    *httputil.ReverseProxy
 	log   *log.Logger
+	// trust holds the upstream certificates a user has confirmed by hand.
+	trust *trustStore
 }
 
 type ctxKey struct{}
@@ -92,6 +93,7 @@ func siteCheckFrom(ctx context.Context) SiteCheck {
 const (
 	shimPath   = "/_wv/shim.js"
 	gotoPath   = "/_wv/go"
+	trustPath  = "/_wv/trust"
 	assetPath  = "/_wv/"
 	portalPath = "/"
 )
@@ -117,35 +119,35 @@ func New(opts Options) *Handler {
 		opts.Logger = log.Default()
 	}
 
+	h := &Handler{
+		opts:  opts,
+		codec: opts.Codec,
+		rw:    Rewriter{Codec: opts.Codec},
+		log:   opts.Logger,
+		trust: newTrustStore(),
+	}
+
 	dialer := &net.Dialer{
 		Timeout:        opts.DialTimeout,
 		KeepAlive:      30 * time.Second,
 		ControlContext: opts.Guard.DialControl(siteCheckFrom),
 	}
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dialer.DialContext,
+		Proxy:       http.ProxyFromEnvironment,
+		DialContext: dialer.DialContext,
+		// TLS is dialed by hand so an unverifiable certificate becomes a
+		// question for the user instead of a dead end.
+		DialTLSContext:        h.dialTLS(dialer),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   opts.DialTimeout,
 		ExpectContinueTimeout: time.Second,
 		ResponseHeaderTimeout: opts.ResponseHeaderTimeout,
 		// Content coding is negotiated explicitly in rewriteRequest so the
 		// rewriter only ever has to undo gzip.
 		DisableCompression: true,
-		TLSClientConfig: &tls.Config{
-			MinVersion:         tls.VersionTLS12,
-			InsecureSkipVerify: opts.InsecureTLS,
-		},
 	}
 
-	h := &Handler{
-		opts:  opts,
-		codec: opts.Codec,
-		rw:    Rewriter{Codec: opts.Codec},
-		log:   opts.Logger,
-	}
 	h.rp = &httputil.ReverseProxy{
 		Transport:      transport,
 		Rewrite:        h.rewriteRequest,
@@ -165,6 +167,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		serveShim(w, r)
 	case path == gotoPath:
 		h.serveGoto(w, r)
+	case path == trustPath:
+		h.serveTrust(w, r)
 	case strings.HasPrefix(path, assetPath):
 		http.NotFound(w, r)
 	case h.plain.Match(r.Host, path):
@@ -517,6 +521,11 @@ func bodyKind(contentType string) bodyType {
 
 func (h *Handler) handleError(w http.ResponseWriter, r *http.Request, err error) {
 	if errors.Is(err, context.Canceled) {
+		return
+	}
+	var ce *certError
+	if errors.As(err, &ce) {
+		h.serveUntrusted(w, r, ce)
 		return
 	}
 	target := "?"

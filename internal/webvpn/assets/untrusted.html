@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>证书不受信任</title>
+<style>
+  :root{
+    color-scheme: light dark;
+    --bg:#f4f5f7; --card:#ffffff; --border:#e3e6ec; --line:#eef0f4;
+    --fg:#151a23; --muted:#6b7280; --faint:#9aa1ad;
+    --accent:#3b5bdb; --accent-fg:#fff; --accent-soft:#eef1fd;
+    --warn:#b7791f; --warn-soft:#fdf6e7;
+    --radius:14px; --shadow:0 1px 2px rgba(16,24,40,.04), 0 12px 32px -14px rgba(16,24,40,.18);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0b0d12; --card:#141821; --border:#232a37; --line:#1c2230;
+      --fg:#e8eaf0; --muted:#9aa3b2; --faint:#6b7484;
+      --accent:#6b87f0; --accent-fg:#0b0d12; --accent-soft:#1a2133;
+      --warn:#e0b354; --warn-soft:#241f12;
+      --shadow:0 1px 2px rgba(0,0,0,.4), 0 20px 40px -20px rgba(0,0,0,.7);
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; padding:44px 20px; background:var(--bg); color:var(--fg);
+    font:15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+         "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", Roboto, sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  main{max-width:640px; margin:0 auto; background:var(--card); border:1px solid var(--border);
+       border-radius:var(--radius); box-shadow:var(--shadow); padding:30px 28px 26px}
+  .mark{width:36px;height:36px;border-radius:10px;background:var(--warn-soft);
+        display:grid;place-items:center;margin-bottom:18px}
+  .mark svg{width:19px;height:19px;stroke:var(--warn);fill:none;stroke-width:1.8;
+            stroke-linecap:round;stroke-linejoin:round}
+  h1{margin:0 0 8px; font-size:20px; font-weight:650; letter-spacing:-.01em}
+  .sub{margin:0 0 20px; color:var(--muted); font-size:13.5px}
+  .target{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:13px;
+          word-break:break-all; color:var(--fg)}
+  .reason{margin:0 0 22px; padding:11px 13px; border-radius:10px; background:var(--warn-soft);
+          color:var(--warn); font-size:12.5px; word-break:break-word}
+  dl{display:grid; grid-template-columns:auto 1fr; gap:9px 16px; margin:0 0 24px;
+     padding:16px; border:1px solid var(--border); border-radius:11px; font-size:13px}
+  dt{color:var(--muted); white-space:nowrap}
+  dd{margin:0; word-break:break-all;
+     font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12.5px}
+  dd.plain{font-family:inherit; font-size:13px}
+  .actions{display:flex; align-items:center; gap:12px; flex-wrap:wrap}
+  button{
+    padding:10px 18px; border:0; border-radius:10px; background:var(--accent);
+    color:var(--accent-fg); font:inherit; font-weight:600; cursor:pointer;
+  }
+  button:hover{opacity:.92}
+  a.back{
+    padding:9px 16px; border-radius:10px; border:1px solid var(--border); color:var(--fg);
+    text-decoration:none; font-size:13.5px;
+  }
+  a.back:hover{border-color:var(--accent); color:var(--accent)}
+  .foot{margin:20px 0 0; padding-top:16px; border-top:1px solid var(--line);
+        color:var(--faint); font-size:12px}
+</style>
+</head>
+<body>
+<main>
+  <div class="mark" aria-hidden="true">
+    <svg viewBox="0 0 24 24"><path d="M12 9v4m0 4h.01M10.3 3.9 2.4 17.4A2 2 0 0 0 4.1 20.4h15.8a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/></svg>
+  </div>
+
+  <h1>目标站点的证书不受信任</h1>
+  <p class="sub">网关无法验证 <span class="target">{{.Target}}</span> 的 TLS 证书。
+    {{if .SelfSigned}}该证书是自签名的{{else}}其颁发者不在系统信任列表中{{end}}{{if .Expired}}，并且已过期或尚未生效{{end}}。</p>
+
+  <p class="reason">{{.Reason}}</p>
+
+  <dl>
+    <dt>证书主体</dt><dd>{{.Subject}}</dd>
+    <dt>颁发者</dt><dd>{{.Issuer}}</dd>
+    {{if .Names}}<dt>适用名称</dt><dd>{{.Names}}</dd>{{end}}
+    <dt>有效期</dt><dd class="plain">{{.NotBefore}} — {{.NotAfter}}</dd>
+    <dt>SHA-256</dt><dd>{{.Fingerprint}}</dd>
+  </dl>
+
+  <div class="actions">
+    <form method="post" action="/_wv/trust">
+      <input type="hidden" name="host" value="{{.Host}}">
+      <input type="hidden" name="fingerprint" value="{{.Fingerprint}}">
+      <input type="hidden" name="next" value="{{.Next}}">
+      <button type="submit">继续访问</button>
+    </form>
+    <a class="back" href="/">返回门户</a>
+  </div>
+
+  <p class="foot">继续之后，网关只信任上面这张证书（按指纹匹配），且仅在本次进程内有效；
+    证书一旦更换会再次询问。请先核对指纹与该站点管理员提供的值是否一致。</p>
+</main>
+</body>
+</html>
