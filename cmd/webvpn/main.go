@@ -209,6 +209,7 @@ func run(c config, logger *log.Logger) error {
 		RestoreFor: func(target *url.URL) bool {
 			return cfg.RestoresAddresses(target.Host)
 		},
+		ForceSecure: cfg.PublicHTTPS,
 		Portal: webvpn.Portal{
 			Name:      c.portal,
 			Bookmarks: func() []webvpn.Category { return categories(cfg) },

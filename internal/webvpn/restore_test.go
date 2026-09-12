@@ -401,3 +401,47 @@ func TestFoldedGatewayPathRedirectsTheBrowser(t *testing.T) {
 		t.Errorf("an ordinary request was disturbed: %d", resp.StatusCode)
 	}
 }
+
+// Wherever TLS is terminated in front of the gateway, this process serves plain
+// http while the browser is on https. Every absolute address the gateway writes
+// has to say https, or the browser sees a different origin: mixed content, a
+// preflight on every request, and a redirect back to https that a preflight is
+// not allowed to follow.
+func TestSubdomainAddressesFollowTheBrowsersScheme(t *testing.T) {
+	origin := originServer(t)
+	codec, err := NewHostCodec("intra.test", "app.intra.test", "", false /* this process serves plain http */)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, client := gatewayFor(t, Options{Codec: codec})
+	host := originHost(t, origin)
+	name, port, _ := strings.Cut(host, ":")
+	label := strings.ReplaceAll(name, ".", "-") + "-p" + port + ".intra.test"
+
+	// Told by the proxy in front that the browser is on https.
+	_, body := get(t, client, gw.URL+"/p/http/"+host+"/", map[string]string{
+		"X-Forwarded-Proto": "https",
+	})
+	if want := `href="https://` + label + `/page2"`; !strings.Contains(body, want) {
+		t.Errorf("rewritten address does not follow the browser's scheme, want %q:\n%s", want, body)
+	}
+	if strings.Contains(body, `"http://`+label) {
+		t.Errorf("an http address was written into an https page:\n%s", body)
+	}
+	if !strings.Contains(body, `"s":"1"`) {
+		t.Errorf("the shim was not told the browser is on https:\n%s", body)
+	}
+
+	// Plain http is still plain http.
+	_, body = get(t, client, gw.URL+"/p/http/"+host+"/", nil)
+	if want := `href="http://` + label + `/page2"`; !strings.Contains(body, want) {
+		t.Errorf("a plain request was upgraded, want %q:\n%s", want, body)
+	}
+
+	// And a gateway that cannot be told by header can be told outright.
+	forced, client := gatewayFor(t, Options{Codec: codec, ForceSecure: func() bool { return true }})
+	_, body = get(t, client, forced.URL+"/p/http/"+host+"/", nil)
+	if want := `href="https://` + label + `/page2"`; !strings.Contains(body, want) {
+		t.Errorf("the forced scheme was not applied, want %q:\n%s", want, body)
+	}
+}

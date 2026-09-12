@@ -46,6 +46,12 @@ type Options struct {
 	// JSScope bounds the rewriting of absolute URLs inside scripts and JSON.
 	JSScope JSScope
 
+	// ForceSecure declares that browsers reach this gateway over https even
+	// though this process serves plain http — TLS terminated in front of it.
+	// Without it the scheme is read from the request, which needs the proxy to
+	// pass X-Forwarded-Proto.
+	ForceSecure func() bool
+
 	// RestoreFor reports whether outbound parameters aimed at a target should
 	// have gateway addresses put back to the addresses they stand for, which
 	// is what makes single sign-on work. Nil restores for every target.
@@ -203,11 +209,44 @@ func (h *Handler) restores(target *url.URL) bool {
 	return h.opts.RestoreFor(target)
 }
 
+// codecSecure returns the addressing scheme in force, told whether the browser's
+// leg is TLS. See codecFor for why that is not this process's own scheme.
+func (h *Handler) codecSecure(secure bool) Codec {
+	c := h.codec()
+	if hc, ok := c.(*HostCodec); ok && hc.TLS != secure {
+		clone := *hc
+		clone.TLS = secure
+		return &clone
+	}
+	return c
+}
+
+// codecFor returns the addressing scheme in force, told how the browser reached
+// the gateway.
+//
+// The sub-domain codec writes absolute addresses, and their scheme has to be the
+// one the browser is using. Reading it off this process is wrong wherever TLS is
+// terminated in front of the gateway: the page arrives over https and every
+// address written into it says http, which is a different origin to the browser
+// — mixed content, a preflight on every request, and a redirect back to https
+// that a preflight is not allowed to follow.
+func (h *Handler) codecFor(info *reqInfo) Codec {
+	return h.codecSecure(info != nil && info.secure)
+}
+
+// isSecure reports whether the browser's leg to the gateway is TLS.
+func (h *Handler) isSecure(r *http.Request) bool {
+	if h.opts.ForceSecure != nil && h.opts.ForceSecure() {
+		return true
+	}
+	return isSecureRequest(r)
+}
+
 // rewriter builds a rewriter for the codec currently in force. info carries the
 // gateway origin the browser is using, which scripts are rewritten against; it
 // may be nil where no request is in hand.
 func (h *Handler) rewriter(info *reqInfo) Rewriter {
-	return Rewriter{Codec: h.codec(), Scope: h.opts.JSScope, Origin: info.gatewayOrigin()}
+	return Rewriter{Codec: h.codecFor(info), Scope: h.opts.JSScope, Origin: info.gatewayOrigin()}
 }
 
 // gatewayOrigin is the gateway as this browser reaches it, or "" when it is not
@@ -265,7 +304,7 @@ func (h *Handler) serveGoto(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "目标被网关策略拒绝: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	ref := h.codec().Encode(target)
+	ref := h.codecSecure(h.isSecure(r)).Encode(target)
 	if ref == "" {
 		http.Error(w, "无法编码该目标地址", http.StatusBadRequest)
 		return
@@ -289,7 +328,7 @@ func (h *Handler) serveStray(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if enc := h.codec().Encode(target); enc != "" {
+	if enc := h.codecSecure(h.isSecure(r)).Encode(target); enc != "" {
 		h.log.Printf("stray %s %s -> %s", r.Method, r.URL.RequestURI(), target)
 		http.Redirect(w, r, enc, http.StatusTemporaryRedirect)
 		return
@@ -419,7 +458,7 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 	// address it meant, so that what it reads back about where it is — and
 	// every relative reference measured from there — is the site's own.
 	if fixed := h.unwrapTarget(target); fixed.String() != target.String() {
-		if enc := h.codec().Encode(fixed); enc != "" {
+		if enc := h.codecSecure(h.isSecure(r)).Encode(fixed); enc != "" {
 			h.log.Printf("unwrapped %s -> %s", target, fixed)
 			code := http.StatusFound
 			if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -437,7 +476,7 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 	}
 	info := &reqInfo{
 		target:      target,
-		secure:      isSecureRequest(r),
+		secure:      h.isSecure(r),
 		site:        check,
 		jarKey:      h.sessionKey(r),
 		browserHost: r.Host,
@@ -559,7 +598,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 
 	if loc := resp.Header.Get("Location"); loc != "" {
 		if u, err := target.Parse(strings.TrimSpace(loc)); err == nil {
-			if enc := h.codec().Encode(u); enc != "" {
+			if enc := h.codecFor(info).Encode(u); enc != "" {
 				resp.Header.Set("Location", enc)
 			}
 		}
@@ -613,7 +652,7 @@ func (h *Handler) rewriteCookies(resp *http.Response, info *reqInfo) {
 			toBrowser = true
 		}
 		if toBrowser {
-			resp.Header.Add("Set-Cookie", sc.rewrite(h.cookiePath(info.target, sc.originPath()), info.secure))
+			resp.Header.Add("Set-Cookie", sc.rewrite(h.cookiePath(info, sc.originPath()), info.secure))
 		}
 	}
 	if len(shared) > 0 {
@@ -623,10 +662,10 @@ func (h *Handler) rewriteCookies(resp *http.Response, info *reqInfo) {
 
 // cookiePath maps an origin cookie path into the gateway's path space by asking
 // the codec where that path lives.
-func (h *Handler) cookiePath(target *url.URL, path string) string {
-	scoped := *target
+func (h *Handler) cookiePath(info *reqInfo, path string) string {
+	scoped := *info.target
 	scoped.Path, scoped.RawPath, scoped.RawQuery, scoped.Fragment = path, "", "", ""
-	enc := h.codec().Encode(&scoped)
+	enc := h.codecFor(info).Encode(&scoped)
 	if enc == "" {
 		return "/"
 	}
@@ -683,7 +722,7 @@ func (h *Handler) rewriteBody(resp *http.Response, info *reqInfo) error {
 	var out []byte
 	switch kind {
 	case bodyHTML:
-		out = h.rewriter(info).HTML(buf, target, h.inject(target))
+		out = h.rewriter(info).HTML(buf, target, h.inject(info))
 	case bodyCSS:
 		out = []byte(h.rewriter(info).CSS(string(buf), target))
 	case bodyScript:
@@ -700,15 +739,17 @@ func (h *Handler) rewriteBody(resp *http.Response, info *reqInfo) error {
 // inject builds the <head> snippet that boots the client-side shim. The shim
 // needs to know how this gateway addresses targets, or it would wrap an address
 // that is already a gateway address.
-func (h *Handler) inject(target *url.URL) string {
-	conf := map[string]string{"p": PlainPrefix, "t": target.String(), "m": h.codec().Name()}
+func (h *Handler) inject(info *reqInfo) string {
+	conf := map[string]string{"p": PlainPrefix, "t": info.target.String(), "m": h.codec().Name()}
 	if name := h.opts.SessionCookie; name != "" {
 		conf["c"] = name
 	}
 	if hc, ok := h.codec().(*HostCodec); ok {
 		conf["b"] = hc.Base
 		conf["port"] = hc.Port
-		if hc.TLS {
+		// The scheme the shim builds addresses with is the one the browser is
+		// using, not the one this process listens on.
+		if info.secure {
 			conf["s"] = "1"
 		}
 	}

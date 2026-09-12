@@ -75,7 +75,10 @@ type portalData struct {
 }
 
 func (h *Handler) servePortal(w http.ResponseWriter, r *http.Request) {
-	data := portalData{Name: h.opts.Portal.Name, URLMode: h.codec().Name()}
+	// Bookmarks are addresses the browser will follow, so they carry the
+	// scheme the browser is using.
+	codec := h.codecSecure(h.isSecure(r))
+	data := portalData{Name: h.opts.Portal.Name, URLMode: codec.Name()}
 	if data.Name == "" {
 		data.Name = "WebVPN"
 	}
@@ -93,7 +96,7 @@ func (h *Handler) servePortal(w http.ResponseWriter, r *http.Request) {
 				Name:   it.Name,
 				URL:    u.Host + u.Path,
 				Target: u.String(),
-				Href:   h.codec().Encode(u),
+				Href:   codec.Encode(u),
 				Note:   it.Note,
 				Icon:   firstRune(it.Name),
 			})

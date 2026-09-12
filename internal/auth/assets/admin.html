@@ -175,6 +175,16 @@
         <input id="public-port" type="text" placeholder="留空表示 80 / 443" spellcheck="false" autocapitalize="off">
         <p class="sub">浏览器访问网关所用的端口，非默认端口才需填写。</p>
       </div>
+      <div>
+        <label for="public-scheme">对外协议</label>
+        <select id="public-scheme">
+          <option value="auto">自动识别</option>
+          <option value="https">强制 HTTPS</option>
+        </select>
+        <p class="sub">子域名模式写出的是绝对地址，协议必须与浏览器正在使用的一致。
+          TLS 由前置 nginx 终结时，网关自己是明文，需前置代理传 <code>X-Forwarded-Proto</code>；
+          传不了就选“强制 HTTPS”。选错会让页面里出现混合内容与跨源预检。</p>
+      </div>
     </div>
 
     <p class="notice" id="url-preview" hidden></p>
@@ -399,7 +409,7 @@
   // The API round-trips the whole configuration, so every section saves on top
   // of the last known state instead of blanking the fields it does not show.
   const EMPTY = {default_domain:"", allowed_users:[], admins:[],
-                 gateway:{url_mode:"plain", base_domain:"", host:"", public_port:""},
+                 gateway:{url_mode:"plain", base_domain:"", host:"", public_port:"", public_scheme:"auto"},
                  tls:{cert:"", key:"", clear:false, key_set:false},
                  access:{mode:"off", sites:[]},
                  sso:{mode:"all", hosts:[]},
@@ -426,7 +436,7 @@
     cfg = Object.assign(JSON.parse(JSON.stringify(EMPTY)), c);
     cfg.access = Object.assign({mode:"off", sites:[]}, cfg.access || {});
     cfg.sso = Object.assign({mode:"all", hosts:[]}, cfg.sso || {});
-    cfg.gateway = Object.assign({url_mode:"plain", base_domain:"", host:"", public_port:""}, cfg.gateway || {});
+    cfg.gateway = Object.assign({url_mode:"plain", base_domain:"", host:"", public_port:"", public_scheme:"auto"}, cfg.gateway || {});
     cfg.tls = Object.assign({cert:"", key:"", clear:false, key_set:false}, cfg.tls || {});
     cfg.tls.key = ""; cfg.tls.clear = false;
     const urlRadio = document.querySelector('input[name=urlmode][value="' + cfg.gateway.url_mode + '"]');
@@ -434,6 +444,7 @@
     $("base-domain").value = cfg.gateway.base_domain || "";
     $("portal-host").value = cfg.gateway.host || "";
     $("public-port").value = cfg.gateway.public_port || "";
+    $("public-scheme").value = cfg.gateway.public_scheme || "auto";
     $("tls-cert").value = cfg.tls.cert || "";
     $("tls-key").value = "";
     $("tls-key-hint").textContent = cfg.tls.key_set ? "已保存私钥，留空表示不修改。" : "尚未配置私钥。";
@@ -555,12 +566,13 @@
     var base = $("base-domain").value.trim();
     var port = $("public-port").value.trim();
     var box = $("url-preview");
+    var scheme = $("public-scheme").value === "https" ? "https:" : location.protocol;
     var sample = "https://oa.intra.corp.com/portal";
     var out;
     if (mode === "subdomain") {
       if (!base) { box.textContent = "子域名模式需要填写网关域名。"; box.hidden = false; return; }
       var host = encodeLabel("oa.intra.corp.com", "", true) + "." + base + (port ? ":" + port : "");
-      out = location.protocol + "//" + host + "/portal";
+      out = scheme + "//" + host + "/portal";
       var portal = ($("portal-host").value.trim() || ("app." + base)) + (port ? ":" + port : "");
       box.textContent = sample + "  →  " + out +
         "　｜　门户：" + location.protocol + "//" + portal +
@@ -577,6 +589,7 @@
   document.querySelectorAll("input[name=urlmode]").forEach(function (el) {
     el.addEventListener("change", renderPreview);
   });
+  $("public-scheme").addEventListener("change", renderPreview);
   ["base-domain", "portal-host", "public-port"].forEach(function (id) {
     $(id).addEventListener("input", renderPreview);
   });
@@ -586,7 +599,8 @@
       url_mode: currentUrlMode(),
       base_domain: $("base-domain").value.trim(),
       host: $("portal-host").value.trim(),
-      public_port: $("public-port").value.trim()
+      public_port: $("public-port").value.trim(),
+      public_scheme: $("public-scheme").value
     }});
   });
 
