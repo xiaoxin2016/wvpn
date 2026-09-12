@@ -1,10 +1,16 @@
 package auth
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -746,4 +752,105 @@ func TestIdentityRoutesBelongToTheGatewayHost(t *testing.T) {
 	if got := m.cookie("x", time.Hour).Domain; got != ".app.intra.corp.com" {
 		t.Errorf("cookie domain = %q", got)
 	}
+}
+
+func TestAdminCertificate(t *testing.T) {
+	m, mailer := newManager(t, store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+	})
+	srv, client := newServer(t, m)
+	signIn(t, client, srv, mailer, "root")
+
+	cert, key := testKeyPair(t)
+	base := map[string]any{
+		"default_domain": "test.com",
+		"allowed_users":  []string{"*@test.com"},
+		"admins":         []string{"root@test.com"},
+		"access":         map[string]any{"mode": "off", "sites": []string{}},
+		"bookmarks":      []any{},
+		"gateway":        map[string]any{"url_mode": "plain", "base_domain": "", "host": "", "public_port": ""},
+		"smtp": map[string]any{
+			"addr": "", "from": "", "username": "", "password": "", "tls_mode": "auto",
+			"allow_plaintext_auth": false, "helo": "", "insecure_skip_verify": false,
+			"clear_password": false, "password_set": false,
+		},
+	}
+	post := func(tlsPart map[string]any) (int, map[string]any) {
+		body := map[string]any{}
+		for k, v := range base {
+			body[k] = v
+		}
+		body["tls"] = tlsPart
+		return postJSON(t, client, srv.URL+"/admin/api/config", body)
+	}
+
+	status, out := post(map[string]any{"cert": cert, "key": key, "clear": false, "key_set": false})
+	if status != http.StatusOK || out["ok"] != true {
+		t.Fatalf("saving the certificate: %d %v", status, out)
+	}
+	if got := m.store.Get().TLS; !got.Configured() {
+		t.Fatal("certificate not stored")
+	}
+
+	// The key never comes back; the certificate and a summary do.
+	resp, err := client.Get(srv.URL + "/admin/api/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(raw), "PRIVATE KEY") {
+		t.Error("GET /admin/api/config leaked the private key")
+	}
+	for _, want := range []string{`"key_set":true`, "BEGIN CERTIFICATE", `*.intra.corp.com`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("config view missing %q", want)
+		}
+	}
+
+	// Saving with an empty key keeps the stored one.
+	if status, out = post(map[string]any{"cert": cert, "key": "", "clear": false, "key_set": true}); status != http.StatusOK {
+		t.Fatalf("second save: %d %v", status, out)
+	}
+	if !m.store.Get().TLS.Configured() {
+		t.Error("the stored key was dropped by a save that did not mention it")
+	}
+
+	// A certificate without its matching key is refused.
+	other, _ := testKeyPair(t)
+	if status, _ = post(map[string]any{"cert": other, "key": key, "clear": false, "key_set": true}); status != http.StatusBadRequest {
+		t.Errorf("a mismatched pair was accepted: %d", status)
+	}
+
+	// Clearing is explicit.
+	if status, out = post(map[string]any{"cert": "", "key": "", "clear": true, "key_set": true}); status != http.StatusOK {
+		t.Fatalf("clearing: %d %v", status, out)
+	}
+	if m.store.Get().TLS.Configured() {
+		t.Error("the certificate survived an explicit clear")
+	}
+}
+
+// testKeyPair issues a throwaway wildcard certificate.
+func testKeyPair(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject:      pkix.Name{CommonName: "*.intra.corp.com"},
+		DNSNames:     []string{"*.intra.corp.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 }

@@ -117,7 +117,7 @@ func TestWRDCodecWrongKeyFails(t *testing.T) {
 }
 
 func TestHostCodecRoundTrip(t *testing.T) {
-	c, err := NewHostCodec("webvpn.example.com", "8001", false)
+	c, err := NewHostCodec("webvpn.example.com", "", "8001", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestLabelRoundTrip(t *testing.T) {
 }
 
 func TestHostCodecCarriesThePort(t *testing.T) {
-	c, err := NewHostCodec("app.intra.corp.com", "", false)
+	c, err := NewHostCodec("app.intra.corp.com", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func TestHostCodecCarriesThePort(t *testing.T) {
 		// TLS gateway for the https cases.
 		codec := c
 		if strings.HasPrefix(tc.want, "https://") {
-			codec, _ = NewHostCodec("app.intra.corp.com", "", true)
+			codec, _ = NewHostCodec("app.intra.corp.com", "", "", true)
 		}
 		got := codec.Encode(mustURL(t, tc.target))
 		if got != tc.want {
@@ -198,7 +198,7 @@ func TestHostCodecCarriesThePort(t *testing.T) {
 }
 
 func TestHostCodecFallsBackForLongLabels(t *testing.T) {
-	c, _ := NewHostCodec("app.intra.corp.com", "", false)
+	c, _ := NewHostCodec("app.intra.corp.com", "", "", false)
 	long := strings.Repeat("a", 60) + ".corp.com"
 	got := c.Encode(mustURL(t, "http://"+long+"/x"))
 	if !strings.HasPrefix(got, "/p/http/") {
@@ -216,5 +216,60 @@ func TestParseUserInput(t *testing.T) {
 	}
 	if _, err := ParseUserInput(""); err == nil {
 		t.Error("empty input unexpectedly accepted")
+	}
+}
+
+func TestHostCodecKeepsThePortalOutOfTheTargetSpace(t *testing.T) {
+	// The portal sits inside the same wildcard domain the targets use, so it
+	// has to be excluded from it in both directions.
+	c, err := NewHostCodec("intra.corp.com", "", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.Portal != "app.intra.corp.com" {
+		t.Fatalf("default portal host = %q", c.Portal)
+	}
+
+	if c.Match("app.intra.corp.com", "/") {
+		t.Error("the portal was treated as a proxied target")
+	}
+	if !c.Match("oa-corp-example.intra.corp.com", "/") {
+		t.Error("a target sub-domain was not recognised")
+	}
+	if _, err := c.Decode("app.intra.corp.com", "/admin", ""); err == nil {
+		t.Error("the portal host decoded as a target")
+	}
+
+	// A target whose label would land on the portal's own name goes back to
+	// the path form rather than taking the console with it.
+	got := c.Encode(mustURL(t, "http://app/"))
+	if !strings.HasPrefix(got, "/p/http/") {
+		t.Errorf("a target colliding with the portal name = %q", got)
+	}
+
+	// An explicitly named portal is honoured.
+	named, err := NewHostCodec("intra.corp.com", "webvpn.intra.corp.com", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named.Match("webvpn.intra.corp.com", "/") {
+		t.Error("the named portal was treated as a target")
+	}
+	if !named.Match("app.intra.corp.com", "/") {
+		t.Error("app.<domain> should be an ordinary target once the portal is named elsewhere")
+	}
+}
+
+func TestHostCodecTargetsUseTheWildcardDomain(t *testing.T) {
+	c, _ := NewHostCodec("intra.corp.com", "", "8443", true)
+	got := c.Encode(mustURL(t, "https://oa.other.example/portal"))
+	want := "https://oa-other-example-s.intra.corp.com:8443/portal"
+	if got != want {
+		t.Errorf("Encode = %q, want %q", got, want)
+	}
+	ref := mustURL(t, got)
+	back, err := c.Decode(ref.Host, ref.EscapedPath(), ref.RawQuery)
+	if err != nil || back.String() != "https://oa.other.example/portal" {
+		t.Errorf("round trip gave %v, %v", back, err)
 	}
 }

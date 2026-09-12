@@ -270,7 +270,7 @@ func TestShimIsServed(t *testing.T) {
 
 func TestSubdomainModeEndToEnd(t *testing.T) {
 	origin := originServer(t)
-	codec, err := NewHostCodec("gw.test", "", false)
+	codec, err := NewHostCodec("gw.test", "", "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -408,7 +408,7 @@ func TestCodecCanChangeAtRuntime(t *testing.T) {
 		t.Fatalf("path form not in use: %s", body)
 	}
 
-	subdomain, err := NewHostCodec("app.intra.corp.com", "8080", false)
+	subdomain, err := NewHostCodec("app.intra.corp.com", "", "8080", false)
 	if err != nil {
 		t.Fatal(err)
 	}

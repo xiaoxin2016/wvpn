@@ -801,6 +801,20 @@ type adminConfig struct {
 	Bookmarks     []store.Group `json:"bookmarks"`
 	SMTP          adminSMTP     `json:"smtp"`
 	Gateway       store.Gateway `json:"gateway"`
+	TLS           adminTLS      `json:"tls"`
+}
+
+// adminTLS carries the gateway's certificate. The certificate itself is public
+// and comes back out; the private key only ever goes in.
+type adminTLS struct {
+	Cert string `json:"cert"`
+	// Key is write-only: empty means "keep the stored one".
+	Key string `json:"key"`
+	// Clear removes both halves.
+	Clear bool `json:"clear"`
+	// KeySet and Summary are read-only.
+	KeySet  bool               `json:"key_set"`
+	Summary *store.CertSummary `json:"summary,omitempty"`
 }
 
 type adminSMTP struct {
@@ -832,6 +846,7 @@ func viewOf(c store.Config) adminConfig {
 		Access:        c.Access,
 		Bookmarks:     c.Bookmarks,
 		Gateway:       c.Gateway,
+		TLS:           tlsView(c.TLS),
 		SMTP: adminSMTP{
 			Addr:           c.SMTP.Addr,
 			From:           c.SMTP.From,
@@ -855,6 +870,7 @@ func merge(in adminConfig, current store.Config) store.Config {
 		Access:        in.Access,
 		Bookmarks:     in.Bookmarks,
 		Gateway:       in.Gateway,
+		TLS:           mergeTLS(in.TLS, current.TLS),
 		SMTP: store.SMTP{
 			Addr:               in.SMTP.Addr,
 			From:               in.SMTP.From,
@@ -871,6 +887,30 @@ func merge(in adminConfig, current store.Config) store.Config {
 		out.SMTP.Password = ""
 	case in.SMTP.Password == "":
 		out.SMTP.Password = current.SMTP.Password
+	}
+	return out
+}
+
+// tlsView shows what is configured without handing the key back.
+func tlsView(t store.TLS) adminTLS {
+	out := adminTLS{Cert: t.Cert, KeySet: t.Key != ""}
+	if t.Configured() {
+		if summary, err := t.Summary(); err == nil {
+			out.Summary = &summary
+		}
+	}
+	return out
+}
+
+// mergeTLS folds a submitted certificate onto the stored one, carrying the key
+// over unless the request replaces or clears it.
+func mergeTLS(in adminTLS, current store.TLS) store.TLS {
+	if in.Clear {
+		return store.TLS{}
+	}
+	out := store.TLS{Cert: in.Cert, Key: in.Key}
+	if in.Key == "" {
+		out.Key = current.Key
 	}
 	return out
 }

@@ -1,10 +1,17 @@
 package store
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestGlobMatch(t *testing.T) {
@@ -270,4 +277,93 @@ func TestGatewayValidation(t *testing.T) {
 	if m := s.Get().Gateway.Mode(); m != URLPlain {
 		t.Errorf("default mode = %q, want %q", m, URLPlain)
 	}
+}
+
+func TestPortalHost(t *testing.T) {
+	s := newStore(t, Config{})
+
+	// The portal lives inside the wildcard domain, and defaults to app.<domain>.
+	if err := s.Set(Config{Gateway: Gateway{URLMode: URLSubdomain, BaseDomain: "intra.corp.com"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Get().Gateway.PortalHost(); got != "app.intra.corp.com" {
+		t.Errorf("default portal host = %q", got)
+	}
+
+	if err := s.Set(Config{Gateway: Gateway{
+		URLMode: URLSubdomain, BaseDomain: "intra.corp.com", Host: "webvpn.intra.corp.com",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.Get().Gateway.PortalHost(); got != "webvpn.intra.corp.com" {
+		t.Errorf("configured portal host = %q", got)
+	}
+
+	// A portal outside the wildcard domain would never be served.
+	err := s.Set(Config{Gateway: Gateway{
+		URLMode: URLSubdomain, BaseDomain: "intra.corp.com", Host: "portal.elsewhere.com",
+	}})
+	if err == nil {
+		t.Error("a portal host outside the wildcard domain was accepted")
+	}
+}
+
+func TestTLSValidation(t *testing.T) {
+	s := newStore(t, Config{})
+	cert, key := testKeyPair(t)
+
+	for _, tc := range []struct {
+		name string
+		tls  TLS
+	}{
+		{"key only", TLS{Key: key}},
+		{"cert only", TLS{Cert: cert}},
+		{"not a pair", TLS{Cert: cert, Key: "-----BEGIN PRIVATE KEY-----\nnope\n-----END PRIVATE KEY-----"}},
+	} {
+		if err := s.Set(Config{TLS: tc.tls}); err == nil {
+			t.Errorf("%s: accepted", tc.name)
+		}
+	}
+
+	if err := s.Set(Config{TLS: TLS{Cert: cert, Key: key}}); err != nil {
+		t.Fatalf("a valid pair was rejected: %v", err)
+	}
+	got := s.Get().TLS
+	if !got.Configured() {
+		t.Fatal("Configured() = false for a stored pair")
+	}
+	summary, err := got.Summary()
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if len(summary.DNSNames) == 0 || summary.DNSNames[0] != "*.intra.corp.com" {
+		t.Errorf("summary names = %v", summary.DNSNames)
+	}
+	if summary.Expired {
+		t.Error("a freshly issued certificate reported as expired")
+	}
+}
+
+// testKeyPair issues a throwaway wildcard certificate.
+func testKeyPair(t *testing.T) (certPEM, keyPEM string) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "*.intra.corp.com"},
+		DNSNames:     []string{"*.intra.corp.com", "intra.corp.com"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 }

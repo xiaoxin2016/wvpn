@@ -161,9 +161,14 @@
 
     <div class="grid two">
       <div>
-        <label for="base-domain">网关域名</label>
-        <input id="base-domain" type="text" placeholder="app.intra.corp.com" spellcheck="false" autocapitalize="off">
-        <p class="sub">子域名模式必填，并需把 <code>*.该域名</code> 解析到网关。</p>
+        <label for="base-domain">泛域名</label>
+        <input id="base-domain" type="text" placeholder="intra.corp.com" spellcheck="false" autocapitalize="off">
+        <p class="sub">目标站点的子域都挂在它下面，需把 <code>*.该域名</code> 解析到网关。</p>
+      </div>
+      <div>
+        <label for="portal-host">门户主机</label>
+        <input id="portal-host" type="text" placeholder="app.intra.corp.com" spellcheck="false" autocapitalize="off">
+        <p class="sub">网关自己的页面（门户 / 登录 / 本页）所在主机，留空即 <code>app.泛域名</code>。</p>
       </div>
       <div>
         <label for="public-port">对外端口</label>
@@ -177,6 +182,44 @@
     <div class="actions">
       <button class="primary" id="save-url">保存</button>
       <span class="msg" id="url-msg" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section>
+    <h2>TLS 证书</h2>
+    <p class="hint">网关自己的证书。子域名模式下需要 <code>*.泛域名</code> 的泛域名证书（一张证书覆盖门户与全部目标子域）。
+      私钥只保存在服务端，<strong>不会回显到本页</strong>。</p>
+    <p class="notice" id="tls-notice" hidden></p>
+
+    <div class="grid two">
+      <div>
+        <label for="tls-cert">证书（PEM，含证书链）</label>
+        <textarea id="tls-cert" spellcheck="false" placeholder="-----BEGIN CERTIFICATE-----"></textarea>
+        <p class="sub"><input type="file" id="tls-cert-file" accept=".crt,.pem,.cer,application/x-pem-file"></p>
+      </div>
+      <div>
+        <label for="tls-key">私钥（PEM）</label>
+        <textarea id="tls-key" spellcheck="false" placeholder="-----BEGIN PRIVATE KEY-----"></textarea>
+        <p class="sub"><span id="tls-key-hint">尚未配置私钥。</span>
+          <input type="file" id="tls-key-file" accept=".key,.pem,application/x-pem-file"></p>
+      </div>
+    </div>
+
+    <div id="tls-summary" class="wrap" hidden>
+      <table>
+        <tbody>
+          <tr><th>证书主体</th><td class="mono" id="tls-subject"></td></tr>
+          <tr><th>颁发者</th><td class="mono" id="tls-issuer"></td></tr>
+          <tr><th>适用名称</th><td class="mono" id="tls-names"></td></tr>
+          <tr><th>有效期</th><td id="tls-validity"></td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="save-tls">保存</button>
+      <button class="btn" id="clear-tls" type="button">清除证书</button>
+      <span class="msg" id="tls-msg" role="status" aria-live="polite"></span>
     </div>
   </section>
 
@@ -331,7 +374,8 @@
   // The API round-trips the whole configuration, so every section saves on top
   // of the last known state instead of blanking the fields it does not show.
   const EMPTY = {default_domain:"", allowed_users:[], admins:[],
-                 gateway:{url_mode:"plain", base_domain:"", public_port:""},
+                 gateway:{url_mode:"plain", base_domain:"", host:"", public_port:""},
+                 tls:{cert:"", key:"", clear:false, key_set:false},
                  access:{mode:"off", sites:[]},
                  bookmarks:[], smtp:{addr:"", from:"", username:"", tls_mode:"auto",
                                      allow_plaintext_auth:false, helo:"",
@@ -355,11 +399,18 @@
   function apply(c){
     cfg = Object.assign(JSON.parse(JSON.stringify(EMPTY)), c);
     cfg.access = Object.assign({mode:"off", sites:[]}, cfg.access || {});
-    cfg.gateway = Object.assign({url_mode:"plain", base_domain:"", public_port:""}, cfg.gateway || {});
+    cfg.gateway = Object.assign({url_mode:"plain", base_domain:"", host:"", public_port:""}, cfg.gateway || {});
+    cfg.tls = Object.assign({cert:"", key:"", clear:false, key_set:false}, cfg.tls || {});
+    cfg.tls.key = ""; cfg.tls.clear = false;
     const urlRadio = document.querySelector('input[name=urlmode][value="' + cfg.gateway.url_mode + '"]');
     if (urlRadio) urlRadio.checked = true;
     $("base-domain").value = cfg.gateway.base_domain || "";
+    $("portal-host").value = cfg.gateway.host || "";
     $("public-port").value = cfg.gateway.public_port || "";
+    $("tls-cert").value = cfg.tls.cert || "";
+    $("tls-key").value = "";
+    $("tls-key-hint").textContent = cfg.tls.key_set ? "已保存私钥，留空表示不修改。" : "尚未配置私钥。";
+    renderCert();
     renderPreview();
     cfg.bookmarks = cfg.bookmarks || [];
     cfg.smtp = Object.assign({}, EMPTY.smtp, cfg.smtp || {});
@@ -475,9 +526,10 @@
       if (!base) { box.textContent = "子域名模式需要填写网关域名。"; box.hidden = false; return; }
       var host = encodeLabel("oa.intra.corp.com", "", true) + "." + base + (port ? ":" + port : "");
       out = location.protocol + "//" + host + "/portal";
+      var portal = ($("portal-host").value.trim() || ("app." + base)) + (port ? ":" + port : "");
       box.textContent = sample + "  →  " + out +
-        "　｜　需要 *." + base + " 的 DNS 解析" +
-        (location.protocol === "https:" ? " 与该域的泛域名证书" : "");
+        "　｜　门户：" + location.protocol + "//" + portal +
+        "　｜　需要 *." + base + " 的 DNS 解析与泛域名证书";
     } else if (mode === "wrd") {
       out = "/https/77726476…（加密后的主机名）/portal";
       box.textContent = sample + "  →  " + out;
@@ -490,7 +542,7 @@
   document.querySelectorAll("input[name=urlmode]").forEach(function (el) {
     el.addEventListener("change", renderPreview);
   });
-  ["base-domain", "public-port"].forEach(function (id) {
+  ["base-domain", "portal-host", "public-port"].forEach(function (id) {
     $(id).addEventListener("input", renderPreview);
   });
 
@@ -498,8 +550,60 @@
     save($("save-url"), $("url-msg"), {gateway: {
       url_mode: currentUrlMode(),
       base_domain: $("base-domain").value.trim(),
+      host: $("portal-host").value.trim(),
       public_port: $("public-port").value.trim()
     }});
+  });
+
+  // ---- certificate --------------------------------------------------------
+
+  function renderCert() {
+    var sum = cfg.tls.summary;
+    $("tls-summary").hidden = !sum;
+    if (sum) {
+      $("tls-subject").textContent = sum.subject || "-";
+      $("tls-issuer").textContent = sum.issuer || "-";
+      $("tls-names").textContent = (sum.dns_names || []).join(", ") || "-";
+      $("tls-validity").textContent = sum.not_before + " — " + sum.not_after +
+        (sum.expired ? "（已过期或尚未生效）" : "");
+    }
+    var notice = $("tls-notice");
+    if (!cfg.tls.key_set) {
+      notice.textContent = "尚未配置证书：网关以 HTTP 提供服务。首次配置证书后需要重启进程才会改为 HTTPS；之后更换证书即时生效，无需重启。";
+      notice.hidden = false;
+    } else if (location.protocol !== "https:") {
+      notice.textContent = "证书已配置，但当前连接不是 HTTPS —— 若刚刚才配置，请重启网关进程使其以 HTTPS 提供服务。";
+      notice.hidden = false;
+    } else {
+      notice.hidden = true;
+    }
+  }
+
+  function readInto(fileInput, target) {
+    fileInput.addEventListener("change", function () {
+      var f = fileInput.files && fileInput.files[0];
+      if (!f) return;
+      var reader = new FileReader();
+      reader.onload = function () { $(target).value = String(reader.result).trim(); };
+      reader.readAsText(f);
+    });
+  }
+  readInto($("tls-cert-file"), "tls-cert");
+  readInto($("tls-key-file"), "tls-key");
+
+  $("save-tls").addEventListener("click", function () {
+    save($("save-tls"), $("tls-msg"), {tls: {
+      cert: $("tls-cert").value.trim(),
+      key: $("tls-key").value.trim(),
+      clear: false,
+      key_set: cfg.tls.key_set
+    }});
+  });
+
+  $("clear-tls").addEventListener("click", function () {
+    if (!confirm("清除证书后，网关重启将回到 HTTP。确定继续？")) return;
+    $("tls-cert").value = ""; $("tls-key").value = "";
+    save($("clear-tls"), $("tls-msg"), {tls: {cert:"", key:"", clear:true, key_set:false}});
   });
 
   // ---- bookmark editor ----------------------------------------------------

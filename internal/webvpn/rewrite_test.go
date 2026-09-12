@@ -144,7 +144,7 @@ func TestHTMLInjectionFallback(t *testing.T) {
 }
 
 func TestHTMLRewriteWithHostCodec(t *testing.T) {
-	c, _ := NewHostCodec("gw.test", "", false)
+	c, _ := NewHostCodec("gw.test", "", "", false)
 	rw := Rewriter{Codec: c}
 	base := mustURL(t, "https://example.com/dir/")
 	out := string(rw.HTML([]byte(`<a href="/x">x</a>`), base, ""))
