@@ -354,6 +354,12 @@ OIDC 的 `redirect_uri`、CAS 的 `service`、SAML 的 `RelayState`。这个值�
 | `https://app.intra.corp.com/p/https/soc.corp.com/cb`（路径形式） | `https://soc.corp.com/cb` |
 | `https://app.intra.corp.com/cb`（裸网关地址，即 `location.origin`） | 判定当前页面所属站点，见下 |
 
+**还原后的地址必须保持原样的“形状”。** `redirect_uri` 是**逐字符**与注册值比对的
+（RFC 6749 §3.1.2.3），`https://soc.corp.com` 与 `https://soc.corp.com/` 是两个不同的字符串。
+解码得到的是一个"可以拿去发请求"的 URL，而请求总要有路径，于是一个裸的源会被补出一个
+页面从未写过的 `/`——子域名模式下 `location.origin` 恰好就是裸源，因此**只有子域名模式**
+会撞上这一条。还原时按被替换地址的结尾斜杠对齐，有就保留，没有就不加。
+
 作用范围：查询串，以及 `application/x-www-form-urlencoded` 请求体（SAML/CAS 常用 POST 绑定，上限 1 MB）。
 只改动值中**属于网关**的绝对地址，参数名、顺序与其余取值原样保留；不是网关的地址不动——登录表单里
 `execution`、`authentication-session-id`、用户名口令这类参数不含地址，一个字节都不会被碰。

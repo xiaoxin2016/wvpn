@@ -78,10 +78,10 @@ func (h *Handler) realAddress(u *url.URL, page *url.URL, browserHost string) *ur
 	}
 	// A target encoded in the path or in the host is recoverable exactly.
 	if t, err := h.plain.Decode(u.Host, u.EscapedPath(), u.RawQuery); err == nil {
-		return t
+		return sameShapeAs(u, t)
 	}
 	if t, err := h.codec().Decode(u.Host, u.EscapedPath(), u.RawQuery); err == nil {
-		return t
+		return sameShapeAs(u, t)
 	}
 	// A bare gateway address carries no target of its own: it is what a script
 	// gets from location.origin, and it stands for the page the browser is on.
@@ -91,6 +91,24 @@ func (h *Handler) realAddress(u *url.URL, page *url.URL, browserHost string) *ur
 	out := *u
 	out.Scheme, out.Host = page.Scheme, page.Host
 	return &out
+}
+
+// sameShapeAs restores a decoded address to the shape of the address it stands
+// for.
+//
+// Decoding produces a URL fit to be requested, and a request always has a path,
+// so a bare origin comes back with a "/" the page never wrote. That matters
+// here and nowhere else: this address is going back into a parameter, and the
+// party who reads it compares strings. An OAuth redirect_uri is matched
+// character for character against the registered value (RFC 6749 §3.1.2.3), so
+// https://soc.corp.example/ is simply not https://soc.corp.example.
+func sameShapeAs(src, decoded *url.URL) *url.URL {
+	if decoded.EscapedPath() == "/" && !strings.HasSuffix(src.EscapedPath(), "/") {
+		out := *decoded
+		out.Path, out.RawPath = "", ""
+		return &out
+	}
+	return decoded
 }
 
 // addressedToGateway reports whether a host is one the gateway answers on.

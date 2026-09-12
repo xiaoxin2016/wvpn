@@ -485,3 +485,58 @@ func TestCrossSiteOriginsAreTranslatedBothWays(t *testing.T) {
 		t.Error("Access-Control-Allow-Credentials was lost")
 	}
 }
+
+// An OAuth redirect_uri is compared with the registered value character for
+// character, so the restored address has to have the shape the page wrote —
+// including whether it ends in a slash.
+func TestRestoredAddressesKeepTheirShape(t *testing.T) {
+	codec, err := NewHostCodec("intra.corp.example", "app.intra.corp.example", "", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := New(Options{Codec: codec})
+	page, _ := url.Parse("https://soc.corp.example/portal")
+
+	cases := []struct {
+		name, in, want string
+	}{{
+		// What location.origin yields under the sub-domain codec: a bare
+		// origin, no path at all.
+		name: "a sub-domain origin stays an origin",
+		in:   "https://soc-corp-example-s.intra.corp.example",
+		want: "https://soc.corp.example",
+	}, {
+		name: "a sub-domain origin with a slash keeps it",
+		in:   "https://soc-corp-example-s.intra.corp.example/",
+		want: "https://soc.corp.example/",
+	}, {
+		name: "a path form without a trailing slash stays without one",
+		in:   "https://app.intra.corp.example/p/https/soc.corp.example",
+		want: "https://soc.corp.example",
+	}, {
+		name: "a path form with a trailing slash keeps it",
+		in:   "https://app.intra.corp.example/p/https/soc.corp.example/",
+		want: "https://soc.corp.example/",
+	}, {
+		name: "a real path is untouched either way",
+		in:   "https://soc-corp-example-s.intra.corp.example/oauth/cb",
+		want: "https://soc.corp.example/oauth/cb",
+	}, {
+		// The bare gateway origin under the path codec, which never had the
+		// problem: the address is spliced, not decoded.
+		name: "a bare gateway origin stays an origin",
+		in:   "https://app.intra.corp.example",
+		want: "https://soc.corp.example",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := "redirect_uri=" + url.QueryEscape(tc.in)
+			want := "redirect_uri=" + url.QueryEscape(tc.want)
+			got := h.restoreQuery(in, page, "sso-corp-example-s.intra.corp.example")
+			if got != want {
+				t.Errorf("restored %s\n  to   %s\n  want %s", tc.in, got, want)
+			}
+		})
+	}
+}
