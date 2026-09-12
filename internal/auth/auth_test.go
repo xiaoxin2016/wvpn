@@ -432,6 +432,48 @@ func TestAdminEditsAccessPolicyAndBookmarks(t *testing.T) {
 	}
 }
 
+func TestAdminEditsSSOPolicy(t *testing.T) {
+	m, mailer := newManager(t, store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+	})
+	srv, client := newServer(t, m)
+	signIn(t, client, srv, mailer, "root")
+
+	// Restoration is on everywhere until an operator narrows it.
+	if !m.store.RestoresAddresses("anything.test") {
+		t.Fatal("restoration should be on by default")
+	}
+
+	full := store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+		SSO:           store.SSO{Mode: store.RestoreHosts, Hosts: []string{"sso.corp.com"}},
+	}
+	status, out := postJSON(t, client, srv.URL+"/admin/api/config", full)
+	if status != http.StatusOK || out["ok"] != true {
+		t.Fatalf("saving the SSO policy: %d %v", status, out)
+	}
+	if got := m.store.Get().SSO; got.Mode != store.RestoreHosts || len(got.Hosts) != 1 {
+		t.Errorf("SSO policy not stored: %+v", got)
+	}
+	if !m.store.RestoresAddresses("sso.corp.com") || m.store.RestoresAddresses("oa.corp.com") {
+		t.Error("the stored SSO policy is not in force")
+	}
+
+	// Naming no host at all would silently restore nowhere.
+	bad := full
+	bad.SSO = store.SSO{Mode: store.RestoreHosts}
+	if status, _ = postJSON(t, client, srv.URL+"/admin/api/config", bad); status != http.StatusBadRequest {
+		t.Errorf("an empty host list was accepted: %d", status)
+	}
+	if m.store.Get().SSO.Mode != store.RestoreHosts || len(m.store.Get().SSO.Hosts) != 1 {
+		t.Error("a rejected save changed the stored policy")
+	}
+}
+
 func TestAdminSMTPConfig(t *testing.T) {
 	m, mailer := newManager(t, store.Config{
 		DefaultDomain: "test.com",

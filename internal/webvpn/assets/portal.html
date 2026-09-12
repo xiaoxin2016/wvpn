@@ -120,8 +120,8 @@
   </div>
   <div class="hero">
     <h1>访问内部站点</h1>
-    <p>输入地址即可通过网关访问，支持 http 与 https，可带端口。</p>
-    <form class="jump" action="/_wv/go" method="get" id="jump">
+    <p>输入地址即可通过网关访问，支持 http 与 https，可带端口。站点在新标签页中打开，门户保持不动。</p>
+    <form class="jump" action="/_wv/go" method="get" id="jump" target="_blank">
       <select id="scheme" aria-label="协议">
         <option value="https">https</option>
         <option value="http">http</option>
@@ -150,7 +150,8 @@
     <div class="head"><h2>{{.Name}}</h2></div>
     <div class="grid">
       {{range .Items}}
-      <a class="item" href="{{.Href}}" data-name="{{.Name}}" data-url="{{.Target}}">
+      <a class="item" href="{{.Href}}" target="_blank" rel="noopener"
+         data-name="{{.Name}}" data-url="{{.Target}}">
         <span class="avatar" data-seed="{{.Name}}">{{.Icon}}</span>
         <span class="meta">
           <span class="t">{{.Name}}</span>
@@ -192,6 +193,7 @@
       const a = document.createElement("a");
       a.className = "item";
       a.href = "/_wv/go?url=" + encodeURIComponent(entry.url);
+      a.target = "_blank"; a.rel = "noopener";
 
       const av = document.createElement("span");
       av.className = "avatar";
@@ -225,6 +227,9 @@
     $("url").value = full;
     $("addr").removeAttribute("name");
     remember(full, full.replace(/^https?:\/\//, ""));
+    // The site opens in its own tab, so this page stays: show the entry that
+    // was just recorded instead of leaving a stale list behind.
+    setTimeout(renderRecent, 0);
   });
 
   document.querySelectorAll(".item[data-url]").forEach(function(a){
@@ -232,6 +237,7 @@
     if (av) paint(av, av.dataset.seed || a.dataset.url);
     a.addEventListener("click", function(){
       remember(a.dataset.url, a.dataset.name);
+      setTimeout(renderRecent, 0);
     });
   });
 

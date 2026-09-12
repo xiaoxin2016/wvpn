@@ -38,7 +38,8 @@
   - 登录策略：默认邮箱域、允许登录账号（`*` / `?` 通配）、管理员列表；
   - 邮件发送：SMTP 服务器、发件人、认证与 TLS 选项，可一键发送测试邮件；
   - 访问策略：不限制 / 白名单 / 黑名单三选一，配合站点清单使用（仅约束普通用户，管理员豁免）；
-  - 门户书签：分组与链接的可视化增删改；
+  - 单点登录：请求参数里的回跳地址还原为真实地址，可对全部站点生效或只对 SSO 域生效；
+  - 门户书签：分组与链接的可视化增删改（门户中输入地址或点击书签，均在新标签页打开）；
   - 活动会话：查看与强制注销。
 - **SSRF 防护**：默认拒绝环回、RFC1918、链路本地、CGNAT、组播地址，且在 `net.Dialer.Control`
   中对**实际解析结果**再校验一次，因此 DNS 重绑定（DNS rebinding）同样被拦下。
@@ -58,6 +59,7 @@
 </p>
 
 登录后的门户：协议选择 + 地址栏直达，下面是最近访问（仅存于本地浏览器）与运维配置的常用链接。
+地址栏直达与书签都在**新标签页**中打开，门户本身留在原处，方便接着开下一个站点；最近访问随即刷新，无需重新加载。
 
 ![门户](docs/screenshots/portal.png)
 
@@ -299,6 +301,34 @@ DNS 标签上限 63 字符，超长的主机名（以及 IPv6 字面量）自动
 - `Domain` 与目标主机无关的 Cookie 被丢弃——真实浏览器同样会拒绝。
 - 关闭登录（`-no-auth`）时没有会话可挂，域级 Cookie 退回浏览器路径隔离的老行为。
 
+### 回跳地址还原（redirect_uri / service / RelayState）
+
+SSO 还有一处**响应改写修不好**的地方：应用跳转到身份提供方时，会带上一个说明“登录后回到哪里”的参数——
+OIDC 的 `redirect_uri`、CAS 的 `service`、SAML 的 `RelayState`。这个值由应用从**浏览器当前地址**推导而来
+（`window.location.origin`，或网关自己改写过的链接），经过网关后它就是网关地址：
+
+```
+应用侧真实行为   https://sso.corp.com/authorize?redirect_uri=https://soc.corp.com/callback   ✓
+经过网关         https://sso.corp.com/authorize?redirect_uri=https://app.intra.corp.com/...  ✗ 校验不通过
+```
+
+身份提供方会拿它与为该应用**注册**的回调地址比对，对不上就直接拒绝登录。
+
+方向与响应改写相反：请求**发往目标站点之前**，把参数里的网关地址还原成它所代表的真实地址。
+提供方于是看到自己登记的那个回调，它答复的跳转再按常规改写回网关形式。三种形态都能还原：
+
+| 参数里的地址 | 还原为 |
+| --- | --- |
+| `https://soc-corp-com-s.intra.corp.com/cb`（子域形式） | `https://soc.corp.com/cb` |
+| `https://app.intra.corp.com/p/https/soc.corp.com/cb`（路径形式） | `https://soc.corp.com/cb` |
+| `https://app.intra.corp.com/cb`（裸网关地址，即 `location.origin`） | 按 `Referer` 判定当前页面所属站点 |
+
+作用范围：查询串，以及 `application/x-www-form-urlencoded` 请求体（SAML/CAS 常用 POST 绑定，上限 1 MB）。
+只改动值中**属于网关**的绝对地址，参数名、顺序与其余取值原样保留；不是网关的地址不动。
+
+后台“单点登录”一节控制它：默认**全部站点**生效（参数里出现网关地址本就不是源站期望的形态），
+也可以改为**按域名**只对 `sso.corp.com` 这类身份提供方生效，或整体关闭。
+
 ### 赋值式跳转
 
 `location.href = "https://sso.intra.com/"` 是拦不住的：该属性是 unforgeable 的，任何补丁都看不到这次赋值。
@@ -416,6 +446,7 @@ internal/webvpn/rewrite.go  HTML / CSS 改写（基于 x/net/html tokenizer，�
 internal/webvpn/proxy.go    ReverseProxy 装配、请求/响应改写、Cookie 重定域
 internal/webvpn/guard.go    目标策略：启动参数硬边界 + 后台站点清单 + 反 DNS 重绑定
 internal/webvpn/tls.go      自定义 TLS 拨号：证书验证失败转为询问，确认后按指纹固定信任
+internal/webvpn/restore.go  请求参数中的网关地址还原为真实地址（SSO 回跳）
 internal/webvpn/cookie.go   Cookie 按原始字节改写（不经 Go 的 cookie 解析/序列化）
 internal/webvpn/jar.go      域级 Cookie 的服务端存放，按登录会话隔离
 internal/webvpn/portal.go   门户页

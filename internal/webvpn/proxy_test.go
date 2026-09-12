@@ -255,6 +255,13 @@ func TestPortalRenders(t *testing.T) {
 			t.Errorf("portal missing %q", want)
 		}
 	}
+	// A target opens in its own tab, so the portal stays where it is.
+	if !strings.Contains(body, `id="jump" target="_blank"`) {
+		t.Error("the address form does not open a new tab")
+	}
+	if !strings.Contains(body, `href="/p/https/example.com/a" target="_blank" rel="noopener"`) {
+		t.Errorf("a bookmark does not open a new tab:\n%s", body)
+	}
 }
 
 func TestShimIsServed(t *testing.T) {

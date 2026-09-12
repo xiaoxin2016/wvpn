@@ -802,6 +802,7 @@ type adminConfig struct {
 	SMTP          adminSMTP     `json:"smtp"`
 	Gateway       store.Gateway `json:"gateway"`
 	TLS           adminTLS      `json:"tls"`
+	SSO           store.SSO     `json:"sso"`
 }
 
 // adminTLS carries the gateway's certificate. The certificate itself is public
@@ -847,6 +848,7 @@ func viewOf(c store.Config) adminConfig {
 		Bookmarks:     c.Bookmarks,
 		Gateway:       c.Gateway,
 		TLS:           tlsView(c.TLS),
+		SSO:           c.SSO,
 		SMTP: adminSMTP{
 			Addr:           c.SMTP.Addr,
 			From:           c.SMTP.From,
@@ -871,6 +873,7 @@ func merge(in adminConfig, current store.Config) store.Config {
 		Bookmarks:     in.Bookmarks,
 		Gateway:       in.Gateway,
 		TLS:           mergeTLS(in.TLS, current.TLS),
+		SSO:           in.SSO,
 		SMTP: store.SMTP{
 			Addr:               in.SMTP.Addr,
 			From:               in.SMTP.From,
