@@ -2,6 +2,7 @@ package webvpn
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -146,23 +147,62 @@ func TestHostCodecRoundTrip(t *testing.T) {
 	}
 }
 
-func TestHostCodecFallsBackForPorts(t *testing.T) {
-	c, _ := NewHostCodec("webvpn.example.com", "", false)
-	got := c.Encode(mustURL(t, "http://intranet:8080/x"))
-	if got != "/p/http/intranet:8080/x" {
-		t.Errorf("Encode with port = %q, want the plain form", got)
+func TestLabelRoundTrip(t *testing.T) {
+	for _, host := range []string{"example.com", "git-scm.com", "a--b.example.com", "x.y.z", "intranet"} {
+		for _, port := range []string{"", "8080", "443"} {
+			for _, tls := range []bool{false, true} {
+				label := encodeLabel(host, port, tls)
+				gotHost, gotPort, gotTLS := decodeLabel(label)
+				if gotHost != host || gotPort != port || gotTLS != tls {
+					t.Errorf("label round trip of (%q,%q,%v) gave (%q,%q,%v) via %q",
+						host, port, tls, gotHost, gotPort, gotTLS, label)
+				}
+			}
+		}
 	}
 }
 
-func TestLabelRoundTrip(t *testing.T) {
-	for _, host := range []string{"example.com", "git-scm.com", "a--b.example.com", "x.y.z"} {
-		for _, tls := range []bool{false, true} {
-			label := encodeLabel(host, tls)
-			gotHost, gotTLS := decodeLabel(label)
-			if gotHost != host || gotTLS != tls {
-				t.Errorf("label round trip of (%q,%v) gave (%q,%v) via %q", host, tls, gotHost, gotTLS, label)
-			}
+func TestHostCodecCarriesThePort(t *testing.T) {
+	c, err := NewHostCodec("app.intra.corp.com", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct{ target, want string }{
+		{"http://oa.intra.corp.com/x", "http://oa-intra-corp-com.app.intra.corp.com/x"},
+		{"http://oa.intra.corp.com:8080/x", "http://oa-intra-corp-com-p8080.app.intra.corp.com/x"},
+		{"https://git-scm.com:8443/docs", "https://git--scm-com-p8443-s.app.intra.corp.com/docs"},
+		// A default port is not part of the address.
+		{"https://oa.intra.corp.com:443/x", "https://oa-intra-corp-com-s.app.intra.corp.com/x"},
+	}
+	for _, tc := range cases {
+		// The gateway's own scheme follows its TLS setting, so compare on a
+		// TLS gateway for the https cases.
+		codec := c
+		if strings.HasPrefix(tc.want, "https://") {
+			codec, _ = NewHostCodec("app.intra.corp.com", "", true)
 		}
+		got := codec.Encode(mustURL(t, tc.target))
+		if got != tc.want {
+			t.Errorf("Encode(%s) = %q, want %q", tc.target, got, tc.want)
+			continue
+		}
+		ref := mustURL(t, got)
+		back, err := codec.Decode(ref.Host, ref.EscapedPath(), ref.RawQuery)
+		if err != nil {
+			t.Fatalf("Decode(%q): %v", got, err)
+		}
+		if back.String() != strings.Replace(tc.target, ":443", "", 1) {
+			t.Errorf("round trip of %s gave %s", tc.target, back)
+		}
+	}
+}
+
+func TestHostCodecFallsBackForLongLabels(t *testing.T) {
+	c, _ := NewHostCodec("app.intra.corp.com", "", false)
+	long := strings.Repeat("a", 60) + ".corp.com"
+	got := c.Encode(mustURL(t, "http://"+long+"/x"))
+	if !strings.HasPrefix(got, "/p/http/") {
+		t.Errorf("a host too long for a DNS label should fall back to the path form: %q", got)
 	}
 }
 

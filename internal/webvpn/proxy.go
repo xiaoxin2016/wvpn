@@ -29,7 +29,11 @@ type Identity interface {
 type Options struct {
 	// Codec encodes targets into gateway references. Defaults to PlainCodec.
 	Codec Codec
-	Guard *Guard
+	// CodecFor, when set, is consulted on every request instead of Codec, so
+	// the admin console can change how targets are addressed without a
+	// restart.
+	CodecFor func() Codec
+	Guard    *Guard
 
 	// MaxRewriteBytes caps how much of a response body is buffered for
 	// rewriting; larger bodies stream through untouched.
@@ -55,9 +59,7 @@ type Options struct {
 // Handler is the gateway: landing page, client shim, and proxied traffic.
 type Handler struct {
 	opts  Options
-	codec Codec
 	plain PlainCodec
-	rw    Rewriter
 	rp    *httputil.ReverseProxy
 	log   *log.Logger
 	// trust holds the upstream certificates a user has confirmed by hand.
@@ -127,8 +129,6 @@ func New(opts Options) *Handler {
 
 	h := &Handler{
 		opts:  opts,
-		codec: opts.Codec,
-		rw:    Rewriter{Codec: opts.Codec, Scope: opts.JSScope},
 		log:   opts.Logger,
 		trust: newTrustStore(),
 		jars:  newSessionJars(),
@@ -165,6 +165,25 @@ func New(opts Options) *Handler {
 	return h
 }
 
+// codec returns the addressing scheme in force right now. It is read per
+// request so that switching URL mode in the console takes effect immediately.
+func (h *Handler) codec() Codec {
+	if h.opts.CodecFor != nil {
+		if c := h.opts.CodecFor(); c != nil {
+			return c
+		}
+	}
+	if h.opts.Codec != nil {
+		return h.opts.Codec
+	}
+	return h.plain
+}
+
+// rewriter builds a rewriter for the codec currently in force.
+func (h *Handler) rewriter() Rewriter {
+	return Rewriter{Codec: h.codec(), Scope: h.opts.JSScope}
+}
+
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := r.URL.EscapedPath()
 	switch {
@@ -180,8 +199,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 	case h.plain.Match(r.Host, path):
 		h.serveProxy(w, r, h.plain)
-	case h.codec.Match(r.Host, path):
-		h.serveProxy(w, r, h.codec)
+	case h.codec().Match(r.Host, path):
+		h.serveProxy(w, r, h.codec())
 	case path == portalPath || path == "/index.html":
 		h.servePortal(w, r)
 	default:
@@ -205,7 +224,7 @@ func (h *Handler) serveGoto(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "目标被网关策略拒绝: "+err.Error(), http.StatusForbidden)
 		return
 	}
-	ref := h.codec.Encode(target)
+	ref := h.codec().Encode(target)
 	if ref == "" {
 		http.Error(w, "无法编码该目标地址", http.StatusBadRequest)
 		return
@@ -232,7 +251,7 @@ func (h *Handler) serveStray(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	if enc := h.codec.Encode(target); enc != "" {
+	if enc := h.codec().Encode(target); enc != "" {
 		http.Redirect(w, r, enc, http.StatusTemporaryRedirect)
 		return
 	}
@@ -244,7 +263,7 @@ func (h *Handler) decode(host, path, query string) (*url.URL, error) {
 	if h.plain.Match(host, path) {
 		return h.plain.Decode(host, path, query)
 	}
-	return h.codec.Decode(host, path, query)
+	return h.codec().Decode(host, path, query)
 }
 
 func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec) {
@@ -371,7 +390,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 
 	if loc := resp.Header.Get("Location"); loc != "" {
 		if u, err := target.Parse(strings.TrimSpace(loc)); err == nil {
-			if enc := h.codec.Encode(u); enc != "" {
+			if enc := h.codec().Encode(u); enc != "" {
 				resp.Header.Set("Location", enc)
 			}
 		}
@@ -379,7 +398,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 
 	if link := resp.Header.Get("Link"); link != "" {
 		resp.Header.Set("Link", linkURLRe.ReplaceAllStringFunc(link, func(m string) string {
-			if r := h.rw.Ref(m[1:len(m)-1], target); r != "" {
+			if r := h.rewriter().Ref(m[1:len(m)-1], target); r != "" {
 				return "<" + r + ">"
 			}
 			return m
@@ -438,7 +457,7 @@ func (h *Handler) rewriteCookies(resp *http.Response, info *reqInfo) {
 func (h *Handler) cookiePath(target *url.URL, path string) string {
 	scoped := *target
 	scoped.Path, scoped.RawPath, scoped.RawQuery, scoped.Fragment = path, "", "", ""
-	enc := h.codec.Encode(&scoped)
+	enc := h.codec().Encode(&scoped)
 	if enc == "" {
 		return "/"
 	}
@@ -453,7 +472,7 @@ func (h *Handler) cookiePath(target *url.URL, path string) string {
 
 func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
 	kind := bodyKind(resp.Header.Get("Content-Type"))
-	if kind == bodyScript && h.rw.Scope == JSOff {
+	if kind == bodyScript && h.opts.JSScope == JSOff {
 		kind = bodyOther
 	}
 	if kind == bodyOther || resp.Body == nil || resp.StatusCode == http.StatusNoContent {
@@ -494,11 +513,11 @@ func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
 	var out []byte
 	switch kind {
 	case bodyHTML:
-		out = h.rw.HTML(buf, target, h.inject(target))
+		out = h.rewriter().HTML(buf, target, h.inject(target))
 	case bodyCSS:
-		out = []byte(h.rw.CSS(string(buf), target))
+		out = []byte(h.rewriter().CSS(string(buf), target))
 	case bodyScript:
-		out = []byte(h.rw.JS(string(buf), target))
+		out = []byte(h.rewriter().JS(string(buf), target))
 	}
 
 	resp.Body = io.NopCloser(bytes.NewReader(out))
@@ -508,9 +527,19 @@ func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
 	return nil
 }
 
-// inject builds the <head> snippet that boots the client-side shim.
+// inject builds the <head> snippet that boots the client-side shim. The shim
+// needs to know how this gateway addresses targets, or it would wrap an address
+// that is already a gateway address.
 func (h *Handler) inject(target *url.URL) string {
-	cfg, err := json.Marshal(map[string]string{"p": PlainPrefix, "t": target.String()})
+	conf := map[string]string{"p": PlainPrefix, "t": target.String()}
+	if hc, ok := h.codec().(*HostCodec); ok {
+		conf["b"] = hc.Base
+		conf["port"] = hc.Port
+		if hc.TLS {
+			conf["s"] = "1"
+		}
+	}
+	cfg, err := json.Marshal(conf)
 	if err != nil {
 		return ""
 	}

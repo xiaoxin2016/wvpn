@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -149,17 +150,14 @@ func run(c config, logger *log.Logger) error {
 		return fmt.Errorf("unknown -smtp-tls-mode %q (want auto, require, none or implicit)", c.smtpTLSMode)
 	}
 
-	codec, err := buildCodec(c, serveTLS)
-	if err != nil {
-		return err
-	}
 	jsScope, err := webvpn.ParseJSScope(c.jsRewrite)
 	if err != nil {
 		return err
 	}
 
 	// One JSON file holds everything an admin can change at runtime: who may
-	// sign in, which sites are reachable, and the portal's bookmarks.
+	// sign in, which sites are reachable, how targets are addressed, and the
+	// portal's bookmarks.
 	cfg, err := store.LoadStore(c.configPath, store.Config{
 		DefaultDomain: c.defaultDomain,
 		AllowedUsers:  splitCSV(c.allowUsers),
@@ -171,6 +169,16 @@ func run(c config, logger *log.Logger) error {
 	if err := seedBookmarks(cfg, c.resource, logger); err != nil {
 		return err
 	}
+	if err := seedGateway(cfg, c, logger); err != nil {
+		return err
+	}
+
+	// The addressing scheme is read per request, so switching URL mode in the
+	// console takes effect without a restart.
+	codecs := &codecCache{store: cfg, wrdKey: c.urlKey, tls: serveTLS, logger: logger}
+	if _, err := codecs.build(cfg.Get().Gateway); err != nil {
+		return err
+	}
 
 	// The command-line lists stay the operator's hard boundary; the store is
 	// the layer the admin console edits. Both are consulted.
@@ -178,7 +186,7 @@ func run(c config, logger *log.Logger) error {
 	guard.Site = sitePolicy{cfg}
 
 	gateway := webvpn.New(webvpn.Options{
-		Codec:                 codec,
+		CodecFor:              codecs.get,
 		Guard:                 guard,
 		MaxRewriteBytes:       c.maxRewrite,
 		DialTimeout:           c.dialTimeout,
@@ -215,8 +223,9 @@ func run(c config, logger *log.Logger) error {
 		}
 		defer manager.Close()
 		gateway.SetIdentity(identity{manager}, manager.CookieName())
-		manager.Routes(mux, gatewayHosts(c)...)
 		handler = manager.Require(gateway)
+		manager.SetFallback(handler)
+		manager.Routes(mux)
 	}
 	mux.Handle("/", handler)
 
@@ -240,7 +249,7 @@ func run(c config, logger *log.Logger) error {
 	if serveTLS {
 		scheme = "https"
 	}
-	logger.Printf("webvpn %s listening on %s://%s (url-mode=%s)", version, scheme, ln.Addr(), codec.Name())
+	logger.Printf("webvpn %s listening on %s://%s (url-mode=%s)", version, scheme, ln.Addr(), codecs.get().Name())
 	if setupToken != "" {
 		logger.Print(setupBanner(scheme, ln.Addr().String(), setupToken))
 	}
@@ -270,55 +279,118 @@ func run(c config, logger *log.Logger) error {
 	return nil
 }
 
-func buildCodec(c config, serveTLS bool) (webvpn.Codec, error) {
-	switch c.urlMode {
-	case "plain", "":
-		return webvpn.PlainCodec{}, nil
-	case "wrd":
-		return webvpn.NewWRDCodec(c.urlKey)
-	case "subdomain":
-		return webvpn.NewHostCodec(c.baseDomain, c.publicPort, serveTLS)
+// codecCache builds the addressing scheme from the stored settings, rebuilding
+// only when they change: a request reads it on every hop.
+type codecCache struct {
+	store  *store.Store
+	wrdKey string
+	tls    bool
+	logger *log.Logger
+
+	mu     sync.Mutex
+	key    store.Gateway
+	codec  webvpn.Codec
+	warned bool
+}
+
+func (c *codecCache) get() webvpn.Codec {
+	g := c.store.Get().Gateway
+	c.mu.Lock()
+	if c.codec != nil && c.key == g {
+		defer c.mu.Unlock()
+		return c.codec
+	}
+	c.mu.Unlock()
+
+	codec, err := c.build(g)
+	if err != nil {
+		// Keep serving rather than failing every request; the console is how
+		// the operator fixes this, and the console lives behind this handler.
+		c.mu.Lock()
+		if !c.warned {
+			c.logger.Printf("warning: unusable URL settings (%v); falling back to the plain path form", err)
+			c.warned = true
+		}
+		c.mu.Unlock()
+		return webvpn.PlainCodec{}
+	}
+	return codec
+}
+
+// build makes the codec for a set of settings and caches it.
+func (c *codecCache) build(g store.Gateway) (webvpn.Codec, error) {
+	var (
+		codec webvpn.Codec
+		err   error
+	)
+	switch g.Mode() {
+	case store.URLWRD:
+		codec, err = webvpn.NewWRDCodec(c.wrdKey)
+	case store.URLSubdomain:
+		codec, err = webvpn.NewHostCodec(g.BaseDomain, g.PublicPort, c.tls)
 	default:
-		return nil, fmt.Errorf("unknown -url-mode %q (want plain, wrd or subdomain)", c.urlMode)
+		codec = webvpn.PlainCodec{}
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	c.key, c.codec, c.warned = g, codec, false
+	c.mu.Unlock()
+	return codec, nil
+}
+
+// siteInfo tells the identity layer where the gateway itself lives, which only
+// differs from "everywhere" under the subdomain URL mode.
+func siteInfo(cfg *store.Store, serveTLS bool) auth.SiteInfo {
+	g := cfg.Get().Gateway
+	if g.Mode() != store.URLSubdomain || g.BaseDomain == "" {
+		return auth.SiteInfo{}
+	}
+	host := g.BaseDomain
+	if g.PublicPort != "" {
+		host = net.JoinHostPort(host, g.PublicPort)
+	}
+	scheme := "http"
+	if serveTLS {
+		scheme = "https"
+	}
+	return auth.SiteInfo{
+		GatewayHost:  g.BaseDomain,
+		CookieDomain: "." + g.BaseDomain,
+		LoginOrigin:  scheme + "://" + host,
+		NextDomain:   g.BaseDomain,
 	}
 }
 
-// gatewayHosts lists the Host values the sign-in and admin pages answer on. It
-// is empty — meaning "any host" — unless the subdomain codec is in use, where
-// scoping keeps /login from shadowing a proxied site's own /login.
-func gatewayHosts(c config) []string {
-	if c.urlMode != "subdomain" || c.baseDomain == "" {
+// seedGateway writes the URL settings given on the command line the first time
+// the gateway runs. After that the console owns them.
+func seedGateway(cfg *store.Store, c config, logger *log.Logger) error {
+	if c.urlMode == "" && c.baseDomain == "" && c.publicPort == "" {
 		return nil
 	}
-	hosts := []string{c.baseDomain}
-	if c.publicPort != "" {
-		hosts = append(hosts, net.JoinHostPort(c.baseDomain, c.publicPort))
+	current := cfg.Get()
+	if current.Gateway.URLMode != "" {
+		logger.Printf("URL settings already configured (mode=%s); ignoring the command-line values",
+			current.Gateway.Mode())
+		return nil
 	}
-	return hosts
+	current.Gateway = store.Gateway{
+		URLMode:    c.urlMode,
+		BaseDomain: c.baseDomain,
+		PublicPort: c.publicPort,
+	}
+	if err := cfg.Set(current); err != nil {
+		return err
+	}
+	logger.Printf("URL settings seeded from the command line (mode=%s)", current.Gateway.Mode())
+	return nil
 }
 
 func buildAuth(c config, cfg *store.Store, setupToken string, serveTLS bool, logger *log.Logger) (*auth.Manager, error) {
 	mailer, err := buildMailer(c, cfg, setupToken != "", logger)
 	if err != nil {
 		return nil, err
-	}
-
-	cookieDomain, loginOrigin, nextDomain := "", "", ""
-	if c.urlMode == "subdomain" && c.baseDomain != "" {
-		// One session across every proxied subdomain, and sign-in redirects
-		// that point back at the gateway's own host rather than at /login on a
-		// proxied one, where that route does not exist.
-		cookieDomain = "." + c.baseDomain
-		nextDomain = c.baseDomain
-		scheme := "http"
-		if serveTLS {
-			scheme = "https"
-		}
-		host := c.baseDomain
-		if c.publicPort != "" {
-			host = net.JoinHostPort(host, c.publicPort)
-		}
-		loginOrigin = scheme + "://" + host
 	}
 
 	return auth.New(auth.Options{
@@ -330,9 +402,7 @@ func buildAuth(c config, cfg *store.Store, setupToken string, serveTLS bool, log
 		SessionTTL:        c.sessionTTL,
 		CodeTTL:           c.codeTTL,
 		Secure:            serveTLS,
-		CookieDomain:      cookieDomain,
-		LoginOrigin:       loginOrigin,
-		NextDomain:        nextDomain,
+		Site:              func() auth.SiteInfo { return siteInfo(cfg, serveTLS) },
 		TrustProxyHeaders: c.trustForwarded,
 		AdminNotice:       adminNotice(c),
 		Logger:            logger,

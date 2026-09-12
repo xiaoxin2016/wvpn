@@ -44,6 +44,10 @@ type Options struct {
 	// Secure marks the session cookie Secure; set it when the gateway is
 	// served over TLS.
 	Secure bool
+	// Site reports how the gateway is addressed right now. It is consulted per
+	// request, so the admin console can switch URL mode without a restart.
+	// When nil, the static fields below are used.
+	Site func() SiteInfo
 	// CookieDomain widens the session cookie to a wildcard domain, which the
 	// subdomain URL mode needs. Leave empty for host-only cookies.
 	CookieDomain string
@@ -76,6 +80,73 @@ type Options struct {
 	Logger *log.Logger
 	// Now is overridable for tests.
 	Now func() time.Time
+}
+
+// SiteInfo describes how the gateway is addressed, which changes with the URL
+// mode chosen in the console.
+type SiteInfo struct {
+	// GatewayHost is the host name the portal and the sign-in pages answer on.
+	// Empty means every host is the gateway's, which is the case for the URL
+	// modes that keep the target in the path.
+	GatewayHost string
+	// CookieDomain widens the session cookie so one sign-in covers every
+	// proxied sub-domain. Empty keeps the cookie host-only.
+	CookieDomain string
+	// LoginOrigin is the absolute origin serving the sign-in page, for when a
+	// relative redirect would land on a proxied host that has no /login.
+	LoginOrigin string
+	// NextDomain is the domain whose sub-domains may appear in ?next=.
+	NextDomain string
+}
+
+func (m *Manager) site() SiteInfo {
+	if m.opts.Site != nil {
+		return m.opts.Site()
+	}
+	return SiteInfo{
+		CookieDomain: m.opts.CookieDomain,
+		LoginOrigin:  m.opts.LoginOrigin,
+		NextDomain:   m.opts.NextDomain,
+	}
+}
+
+// onGatewayHost reports whether a request is addressed to the gateway itself
+// rather than to a site it proxies. Under the subdomain URL mode /login and
+// /admin exist only on the gateway's own host; on every other host those paths
+// belong to the proxied site.
+func (m *Manager) onGatewayHost(r *http.Request) bool {
+	host := m.site().GatewayHost
+	if host == "" {
+		return true
+	}
+	name := r.Host
+	if h, _, err := net.SplitHostPort(name); err == nil {
+		name = h
+	}
+	return strings.EqualFold(strings.TrimSuffix(name, "."), host)
+}
+
+// SetFallback names the handler that serves requests the identity routes do not
+// own, which is how a proxied site keeps its own /login.
+func (m *Manager) SetFallback(h http.Handler) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.fallback = h
+}
+
+func (m *Manager) gatewayOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !m.onGatewayHost(r) {
+			m.mu.Lock()
+			fallback := m.fallback
+			m.mu.Unlock()
+			if fallback != nil {
+				fallback.ServeHTTP(w, r)
+				return
+			}
+		}
+		next(w, r)
+	}
 }
 
 // Session is a signed-in browser.
@@ -116,6 +187,9 @@ type Manager struct {
 	// setupOpen is true while the gateway still needs an administrator, and
 	// until one has actually signed in.
 	setupOpen bool
+	// fallback serves paths that look like identity routes but arrived on a
+	// proxied host.
+	fallback http.Handler
 
 	stop chan struct{}
 	once sync.Once
@@ -238,31 +312,26 @@ func (m *Manager) sweep() {
 func (m *Manager) CookieName() string { return sessionCookie }
 
 // Routes registers the identity endpoints. Everything else is expected to be
-// wrapped in Require.
-//
-// hosts scopes the routes to specific Host header values. Leave it empty for a
-// single-host deployment; pass the gateway's own names under the subdomain URL
-// mode, where an unscoped /login would shadow the /login page of every proxied
-// site.
-func (m *Manager) Routes(mux *http.ServeMux, hosts ...string) {
-	if len(hosts) == 0 {
-		hosts = []string{""}
+// wrapped in Require. Under the subdomain URL mode these paths belong to the
+// gateway only on its own host; anywhere else they are handed to the fallback,
+// so a proxied site keeps its own /login.
+func (m *Manager) Routes(mux *http.ServeMux) {
+	route := func(pattern string, h http.HandlerFunc) {
+		mux.HandleFunc(pattern, m.gatewayOnly(h))
 	}
-	for _, host := range hosts {
-		mux.HandleFunc("GET "+host+"/setup", m.handleSetupPage)
-		mux.HandleFunc("POST "+host+"/setup", m.handleSetup)
-		mux.HandleFunc("POST "+host+"/setup/test", m.handleSetupTest)
-		mux.HandleFunc("GET "+host+"/login", m.handleLoginPage)
-		mux.HandleFunc("POST "+host+"/auth/code", m.handleRequestCode)
-		mux.HandleFunc("POST "+host+"/auth/verify", m.handleVerify)
-		mux.HandleFunc(host+"/logout", m.handleLogout)
-		mux.HandleFunc("GET "+host+"/admin", m.handleAdminPage)
-		mux.HandleFunc("GET "+host+"/admin/api/config", m.requireAdminAPI(m.handleGetConfig))
-		mux.HandleFunc("POST "+host+"/admin/api/config", m.requireAdminAPI(m.handleSetConfig))
-		mux.HandleFunc("GET "+host+"/admin/api/sessions", m.requireAdminAPI(m.handleListSessions))
-		mux.HandleFunc("POST "+host+"/admin/api/sessions/revoke", m.requireAdminAPI(m.handleRevokeSession))
-		mux.HandleFunc("POST "+host+"/admin/api/smtp/test", m.requireAdminAPI(m.handleTestMail))
-	}
+	route("GET /setup", m.handleSetupPage)
+	route("POST /setup", m.handleSetup)
+	route("POST /setup/test", m.handleSetupTest)
+	route("GET /login", m.handleLoginPage)
+	route("POST /auth/code", m.handleRequestCode)
+	route("POST /auth/verify", m.handleVerify)
+	route("/logout", m.handleLogout)
+	route("GET /admin", m.handleAdminPage)
+	route("GET /admin/api/config", m.requireAdminAPI(m.handleGetConfig))
+	route("POST /admin/api/config", m.requireAdminAPI(m.handleSetConfig))
+	route("GET /admin/api/sessions", m.requireAdminAPI(m.handleListSessions))
+	route("POST /admin/api/sessions/revoke", m.requireAdminAPI(m.handleRevokeSession))
+	route("POST /admin/api/smtp/test", m.requireAdminAPI(m.handleTestMail))
 }
 
 // Require rejects unauthenticated requests: browsers are sent to the sign-in
@@ -361,7 +430,8 @@ func (m *Manager) handleLoginPage(w http.ResponseWriter, r *http.Request) {
 // loginURL builds the redirect that sends an unauthenticated browser to the
 // sign-in page, remembering where it was headed.
 func (m *Manager) loginURL(r *http.Request) string {
-	if m.opts.LoginOrigin == "" {
+	origin := m.site().LoginOrigin
+	if origin == "" {
 		return "/login?next=" + url.QueryEscape(r.URL.RequestURI())
 	}
 	scheme := "http"
@@ -369,7 +439,7 @@ func (m *Manager) loginURL(r *http.Request) string {
 		scheme = "https"
 	}
 	here := scheme + "://" + r.Host + r.URL.RequestURI()
-	return m.opts.LoginOrigin + "/login?next=" + url.QueryEscape(here)
+	return origin + "/login?next=" + url.QueryEscape(here)
 }
 
 // safeNext keeps post-login redirects inside the gateway. Relative paths are
@@ -377,9 +447,10 @@ func (m *Manager) loginURL(r *http.Request) string {
 // is what lets the subdomain URL mode send a user back to the proxied host they
 // came from.
 func (m *Manager) safeNext(next string) string {
+	site := m.site()
 	home := "/"
-	if m.opts.LoginOrigin != "" {
-		home = m.opts.LoginOrigin + "/"
+	if site.LoginOrigin != "" {
+		home = site.LoginOrigin + "/"
 	}
 	if next == "" || strings.HasPrefix(next, "//") {
 		return home
@@ -390,7 +461,7 @@ func (m *Manager) safeNext(next string) string {
 		}
 		return home
 	}
-	if m.opts.NextDomain == "" {
+	if site.NextDomain == "" {
 		return home
 	}
 	u, err := url.Parse(next)
@@ -398,7 +469,7 @@ func (m *Manager) safeNext(next string) string {
 		return home
 	}
 	host := u.Hostname()
-	if host == m.opts.NextDomain || strings.HasSuffix(host, "."+m.opts.NextDomain) {
+	if host == site.NextDomain || strings.HasSuffix(host, "."+site.NextDomain) {
 		return next
 	}
 	return home
@@ -652,7 +723,7 @@ func (m *Manager) cookie(value string, ttl time.Duration) *http.Cookie {
 		Name:     sessionCookie,
 		Value:    value,
 		Path:     "/",
-		Domain:   m.opts.CookieDomain,
+		Domain:   m.site().CookieDomain,
 		HttpOnly: true,
 		Secure:   m.opts.Secure,
 		SameSite: http.SameSiteLaxMode,
@@ -729,6 +800,7 @@ type adminConfig struct {
 	Access        store.Access  `json:"access"`
 	Bookmarks     []store.Group `json:"bookmarks"`
 	SMTP          adminSMTP     `json:"smtp"`
+	Gateway       store.Gateway `json:"gateway"`
 }
 
 type adminSMTP struct {
@@ -759,6 +831,7 @@ func viewOf(c store.Config) adminConfig {
 		Admins:        c.Admins,
 		Access:        c.Access,
 		Bookmarks:     c.Bookmarks,
+		Gateway:       c.Gateway,
 		SMTP: adminSMTP{
 			Addr:           c.SMTP.Addr,
 			From:           c.SMTP.From,
@@ -781,6 +854,7 @@ func merge(in adminConfig, current store.Config) store.Config {
 		Admins:        in.Admins,
 		Access:        in.Access,
 		Bookmarks:     in.Bookmarks,
+		Gateway:       in.Gateway,
 		SMTP: store.SMTP{
 			Addr:               in.SMTP.Addr,
 			From:               in.SMTP.From,

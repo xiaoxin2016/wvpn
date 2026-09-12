@@ -233,3 +233,41 @@ func TestSMTPValidation(t *testing.T) {
 		t.Errorf("empty SMTP section rejected: %v", err)
 	}
 }
+
+func TestGatewayValidation(t *testing.T) {
+	s := newStore(t, Config{})
+	bad := []struct {
+		name string
+		g    Gateway
+	}{
+		{"unknown mode", Gateway{URLMode: "magic"}},
+		{"subdomain without a domain", Gateway{URLMode: URLSubdomain}},
+		{"single label", Gateway{URLMode: URLSubdomain, BaseDomain: "gateway"}},
+		{"not a domain", Gateway{URLMode: URLSubdomain, BaseDomain: "not a domain"}},
+		{"bad port", Gateway{URLMode: URLPlain, PublicPort: "70000"}},
+	}
+	for _, tc := range bad {
+		if err := s.Set(Config{Gateway: tc.g}); err == nil {
+			t.Errorf("%s: accepted %+v", tc.name, tc.g)
+		}
+	}
+
+	ok := Gateway{URLMode: URLSubdomain, BaseDomain: "App.Intra.Corp.com.", PublicPort: "8443"}
+	if err := s.Set(Config{Gateway: ok}); err != nil {
+		t.Fatalf("valid settings rejected: %v", err)
+	}
+	got := s.Get().Gateway
+	if got.BaseDomain != "app.intra.corp.com" {
+		t.Errorf("base domain not normalised: %q", got.BaseDomain)
+	}
+	if got.Mode() != URLSubdomain {
+		t.Errorf("mode = %q", got.Mode())
+	}
+	// An empty mode means the default, not a broken configuration.
+	if err := s.Set(Config{}); err != nil {
+		t.Fatalf("empty gateway section rejected: %v", err)
+	}
+	if m := s.Get().Gateway.Mode(); m != URLPlain {
+		t.Errorf("default mode = %q, want %q", m, URLPlain)
+	}
+}

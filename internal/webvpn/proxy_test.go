@@ -277,15 +277,17 @@ func TestSubdomainModeEndToEnd(t *testing.T) {
 	gw, client := gatewayFor(t, Options{Codec: codec})
 	host := originHost(t, origin)
 
-	// The origin listens on 127.0.0.1:port, which the label form cannot express,
-	// so the plain fallback path is what a browser would follow. It must still
-	// be served on the gateway's own host.
+	// The plain path form is served on every gateway host, which is how a
+	// target the label form cannot express stays reachable.
 	resp, body := get(t, client, gw.URL+"/p/http/"+host+"/", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	if !strings.Contains(body, `href="/p/http/`+host+`/page2"`) {
-		t.Errorf("fallback rewriting wrong:\n%s", body)
+	// Links come back in the sub-domain form, port and all.
+	name, port, _ := strings.Cut(host, ":")
+	want := "http://" + strings.ReplaceAll(name, ".", "-") + "-p" + port + ".gw.test/page2"
+	if !strings.Contains(body, `href="`+want+`"`) {
+		t.Errorf("subdomain rewriting wrong, want %q:\n%s", want, body)
 	}
 }
 
@@ -389,5 +391,33 @@ func TestProxyRewritesScriptBodies(t *testing.T) {
 	_, body = get(t, client, plain.URL+"/p/http/"+host+"/app.js", nil)
 	if !strings.Contains(body, `location.href = "http://`+host+`/next"`) {
 		t.Errorf("JSOff still rewrote the script: %s", body)
+	}
+}
+
+func TestCodecCanChangeAtRuntime(t *testing.T) {
+	origin := originServer(t)
+	host := originHost(t, origin)
+
+	// What the admin console does: swap the addressing scheme under a running
+	// gateway.
+	var current Codec = PlainCodec{}
+	gw, client := gatewayFor(t, Options{CodecFor: func() Codec { return current }})
+
+	_, body := get(t, client, gw.URL+"/p/http/"+host+"/", nil)
+	if !strings.Contains(body, `href="/p/http/`+host+`/page2"`) {
+		t.Fatalf("path form not in use: %s", body)
+	}
+
+	subdomain, err := NewHostCodec("app.intra.corp.com", "8080", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	current = subdomain
+
+	name, port, _ := strings.Cut(host, ":")
+	want := "http://" + strings.ReplaceAll(name, ".", "-") + "-p" + port + ".app.intra.corp.com:8080/page2"
+	_, body = get(t, client, gw.URL+"/p/http/"+host+"/", nil)
+	if !strings.Contains(body, `href="`+want+`"`) {
+		t.Errorf("the new scheme did not take effect, want %q:\n%s", want, body)
 	}
 }

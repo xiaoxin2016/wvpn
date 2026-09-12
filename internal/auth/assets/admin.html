@@ -147,6 +147,40 @@
 
 <main>
   <section>
+    <h2>网关地址</h2>
+    <p class="hint">决定目标站点在浏览器里长什么样。改动立即生效，但<strong>切换模式后需要重新登录</strong>（会话 Cookie 的作用域随之变化）。</p>
+
+    <div class="modes">
+      <label class="mode"><input type="radio" name="urlmode" value="plain">
+        <span class="t">路径模式</span><span class="d">/p/https/目标主机/路径，单域名即可</span></label>
+      <label class="mode"><input type="radio" name="urlmode" value="wrd">
+        <span class="t">加密路径</span><span class="d">目标主机名不出现在地址栏</span></label>
+      <label class="mode"><input type="radio" name="urlmode" value="subdomain">
+        <span class="t">子域名</span><span class="d">每个站点独立浏览器源，隔离最好</span></label>
+    </div>
+
+    <div class="grid two">
+      <div>
+        <label for="base-domain">网关域名</label>
+        <input id="base-domain" type="text" placeholder="app.intra.corp.com" spellcheck="false" autocapitalize="off">
+        <p class="sub">子域名模式必填，并需把 <code>*.该域名</code> 解析到网关。</p>
+      </div>
+      <div>
+        <label for="public-port">对外端口</label>
+        <input id="public-port" type="text" placeholder="留空表示 80 / 443" spellcheck="false" autocapitalize="off">
+        <p class="sub">浏览器访问网关所用的端口，非默认端口才需填写。</p>
+      </div>
+    </div>
+
+    <p class="notice" id="url-preview" hidden></p>
+
+    <div class="actions">
+      <button class="primary" id="save-url">保存</button>
+      <span class="msg" id="url-msg" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section>
     <h2>登录策略</h2>
     <p class="hint">默认域用于补全只填写前缀的邮箱；账号列表支持通配符 <code>*</code> 与 <code>?</code>，每行一条。</p>
     <div class="grid">
@@ -296,7 +330,9 @@
 
   // The API round-trips the whole configuration, so every section saves on top
   // of the last known state instead of blanking the fields it does not show.
-  const EMPTY = {default_domain:"", allowed_users:[], admins:[], access:{mode:"off", sites:[]},
+  const EMPTY = {default_domain:"", allowed_users:[], admins:[],
+                 gateway:{url_mode:"plain", base_domain:"", public_port:""},
+                 access:{mode:"off", sites:[]},
                  bookmarks:[], smtp:{addr:"", from:"", username:"", tls_mode:"auto",
                                      allow_plaintext_auth:false, helo:"",
                                      insecure_skip_verify:false, password:"", clear_password:false,
@@ -319,6 +355,12 @@
   function apply(c){
     cfg = Object.assign(JSON.parse(JSON.stringify(EMPTY)), c);
     cfg.access = Object.assign({mode:"off", sites:[]}, cfg.access || {});
+    cfg.gateway = Object.assign({url_mode:"plain", base_domain:"", public_port:""}, cfg.gateway || {});
+    const urlRadio = document.querySelector('input[name=urlmode][value="' + cfg.gateway.url_mode + '"]');
+    if (urlRadio) urlRadio.checked = true;
+    $("base-domain").value = cfg.gateway.base_domain || "";
+    $("public-port").value = cfg.gateway.public_port || "";
+    renderPreview();
     cfg.bookmarks = cfg.bookmarks || [];
     cfg.smtp = Object.assign({}, EMPTY.smtp, cfg.smtp || {});
     // The password is never sent back to the browser; only whether one exists.
@@ -404,6 +446,60 @@
     const {data} = await api("/admin/api/smtp/test", {method:"POST", headers:{"Content-Type":"application/json"}, body:"{}"});
     if (!data.ok){ say($("mail-msg"), data.error || "发送失败", "err"); return; }
     say($("mail-msg"), "测试邮件已发送至 " + (data.sent_to || "你的邮箱"), "ok");
+  });
+
+  // ---- gateway address ----------------------------------------------------
+
+  // Mirror of the server-side label encoding, so the preview shows the real
+  // address rather than a description of one.
+  function encodeLabel(host, port, tls) {
+    var label = host.replace(/-/g, "--").replace(/\./g, "-");
+    if (port) label += "-p" + port;
+    if (tls) label += "-s";
+    return label;
+  }
+
+  function currentUrlMode() {
+    var el = document.querySelector("input[name=urlmode]:checked");
+    return el ? el.value : "plain";
+  }
+
+  function renderPreview() {
+    var mode = currentUrlMode();
+    var base = $("base-domain").value.trim();
+    var port = $("public-port").value.trim();
+    var box = $("url-preview");
+    var sample = "https://oa.intra.corp.com/portal";
+    var out;
+    if (mode === "subdomain") {
+      if (!base) { box.textContent = "子域名模式需要填写网关域名。"; box.hidden = false; return; }
+      var host = encodeLabel("oa.intra.corp.com", "", true) + "." + base + (port ? ":" + port : "");
+      out = location.protocol + "//" + host + "/portal";
+      box.textContent = sample + "  →  " + out +
+        "　｜　需要 *." + base + " 的 DNS 解析" +
+        (location.protocol === "https:" ? " 与该域的泛域名证书" : "");
+    } else if (mode === "wrd") {
+      out = "/https/77726476…（加密后的主机名）/portal";
+      box.textContent = sample + "  →  " + out;
+    } else {
+      box.textContent = sample + "  →  /p/https/oa.intra.corp.com/portal";
+    }
+    box.hidden = false;
+  }
+
+  document.querySelectorAll("input[name=urlmode]").forEach(function (el) {
+    el.addEventListener("change", renderPreview);
+  });
+  ["base-domain", "public-port"].forEach(function (id) {
+    $(id).addEventListener("input", renderPreview);
+  });
+
+  $("save-url").addEventListener("click", function () {
+    save($("save-url"), $("url-msg"), {gateway: {
+      url_mode: currentUrlMode(),
+      base_domain: $("base-domain").value.trim(),
+      public_port: $("public-port").value.trim()
+    }});
   });
 
   // ---- bookmark editor ----------------------------------------------------
