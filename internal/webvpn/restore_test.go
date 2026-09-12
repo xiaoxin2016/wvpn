@@ -445,3 +445,43 @@ func TestSubdomainAddressesFollowTheBrowsersScheme(t *testing.T) {
 		t.Errorf("the forced scheme was not applied, want %q:\n%s", want, body)
 	}
 }
+
+// A genuinely cross-site request under the sub-domain codec: the site answering
+// it names the origin it will serve, and the browser compares that against the
+// address bar — which is the gateway's, not the site's.
+func TestCrossSiteOriginsAreTranslatedBothWays(t *testing.T) {
+	var seen string
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Get("Origin")
+		// What a site does: echo back the origin it is willing to serve.
+		w.Header().Set("Access-Control-Allow-Origin", seen)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		io.WriteString(w, "ok")
+	}))
+	t.Cleanup(api.Close)
+
+	codec, err := NewHostCodec("intra.test", "app.intra.test", "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw, client := gatewayFor(t, Options{Codec: codec})
+	apiHost := originHost(t, api)
+	page := "https://oa-corp-test-p8443.intra.test"
+
+	resp, _ := get(t, client, gw.URL+"/p/http/"+apiHost+"/data", map[string]string{
+		"X-Forwarded-Proto": "https",
+		"Origin":            page,
+	})
+
+	// Outbound: the site is told which site is really asking, not the gateway.
+	if want := "http://oa.corp.test:8443"; seen != want {
+		t.Errorf("the site saw Origin %q, want %q", seen, want)
+	}
+	// Inbound: its answer is translated back into what the browser sees.
+	if got, want := resp.Header.Get("Access-Control-Allow-Origin"), page; got != want {
+		t.Errorf("Access-Control-Allow-Origin = %q, want %q", got, want)
+	}
+	if resp.Header.Get("Access-Control-Allow-Credentials") != "true" {
+		t.Error("Access-Control-Allow-Credentials was lost")
+	}
+}

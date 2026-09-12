@@ -556,7 +556,20 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 		}
 	}
 	if o := pr.Out.Header.Get("Origin"); o != "" && o != "null" {
-		pr.Out.Header.Set("Origin", target.Scheme+"://"+target.Host)
+		// The browser names the gateway; the origin wants the site the page is
+		// really on. Under the sub-domain codec that is recoverable, and has to
+		// be: a cross-site request answered with Access-Control-Allow-Origin
+		// naming the wrong site is refused by the browser. Under the path
+		// codecs every page shares one origin and nothing can be recovered from
+		// it, so the target's own is used, which is what a same-site request
+		// would have carried anyway.
+		real := target.Scheme + "://" + target.Host
+		if u, err := url.Parse(o); err == nil && u.Host != "" {
+			if t, err := h.decode(u.Host, "/", ""); err == nil {
+				real = t.Scheme + "://" + t.Host
+			}
+		}
+		pr.Out.Header.Set("Origin", real)
 	}
 
 	// Do not advertise the gateway or its client to the origin.
@@ -600,6 +613,18 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 		if u, err := target.Parse(strings.TrimSpace(loc)); err == nil {
 			if enc := h.codecFor(info).Encode(u); enc != "" {
 				resp.Header.Set("Location", enc)
+			}
+		}
+	}
+
+	// A site that answers a cross-site request names the origin it is willing
+	// to serve. The browser compares that against the address bar, which is the
+	// gateway's, so the name has to be translated the same way the address was.
+	if acao := strings.TrimSpace(resp.Header.Get("Access-Control-Allow-Origin")); acao != "" &&
+		acao != "*" && !strings.EqualFold(acao, "null") {
+		if u, err := url.Parse(acao); err == nil && u.Host != "" {
+			if br := h.browserOrigin(info, u); br != "" {
+				resp.Header.Set("Access-Control-Allow-Origin", br)
 			}
 		}
 	}
@@ -658,6 +683,19 @@ func (h *Handler) rewriteCookies(resp *http.Response, info *reqInfo) {
 	if len(shared) > 0 {
 		storeShared(h.jars.get(info.jarKey), info.target, shared)
 	}
+}
+
+// browserOrigin is the address bar's origin for a site behind the gateway: its
+// own gateway host under the sub-domain codec, and the gateway's own origin
+// under the path codecs, where every site shares one.
+func (h *Handler) browserOrigin(info *reqInfo, origin *url.URL) string {
+	enc := h.codecFor(info).Encode(&url.URL{Scheme: origin.Scheme, Host: origin.Host})
+	if enc != "" && !strings.HasPrefix(enc, "/") {
+		if u, err := url.Parse(enc); err == nil && u.Host != "" {
+			return u.Scheme + "://" + u.Host
+		}
+	}
+	return info.gatewayOrigin()
 }
 
 // cookiePath maps an origin cookie path into the gateway's path space by asking
