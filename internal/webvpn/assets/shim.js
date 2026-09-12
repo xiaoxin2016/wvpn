@@ -20,6 +20,9 @@
   // served on every gateway host — but a page under another one still carries
   // that codec's addresses, which must be recognised as the gateway's own.
   var MODE = cfg.m || "plain";
+  // The gateway's own session cookie, which a proxied page must not touch.
+  var SESSION = cfg.c || "";
+  var COOKIE_URL = ASSETS + "cookie";
   // Mirror of the wrd path shape: /{scheme}[-{port}]/{hex}/...
   var WRD_PATH = /^\/(?:http|https|ws|wss)(?:-[0-9]{1,5})?\/[0-9a-f]+(?:\/|$)/i;
   var OPAQUE = /^(data|blob|javascript|mailto|tel|sms|about|magnet|ftp|file|chrome|chrome-extension|intent):/i;
@@ -380,6 +383,112 @@
       } catch (err) {}
     });
   }
+
+  // ---- document.cookie -----------------------------------------------------
+  //
+  // A page that writes its own cookie names the site's domain in it: a login
+  // hands the browser "accessToken=…; domain=corp.example" and expects it back
+  // on every later request. Behind the gateway the page sits on the gateway's
+  // host, which is not in that domain, so the browser drops the write without a
+  // word — and the site reports the session as expired on the very next call.
+  //
+  // The attributes are therefore translated the same way the gateway translates
+  // a Set-Cookie header: the path is scoped to where this target is served,
+  // flags the browser leg cannot honour are dropped, and a domain-scoped cookie
+  // is handed to the gateway as well, which keeps those server-side and replays
+  // them to every host the domain covers.
+
+  // cookiePath maps the path an origin scoped a cookie to onto the gateway.
+  function cookiePath(p) {
+    try {
+      var u = new URL(p && p.charAt(0) === "/" ? p : "/", base);
+      u.search = "";
+      u.hash = "";
+      var enc = encode(u);
+      if (!enc) return "/";
+      if (enc.charAt(0) === "/") return enc;
+      return new URL(enc).pathname || "/";
+    } catch (e) {
+      return "/";
+    }
+  }
+
+  // rewriteCookie returns the cookie to hand the browser, and reports a
+  // domain-scoped one to the gateway. An empty string means: write nothing.
+  function rewriteCookie(raw) {
+    var parts = String(raw).split(";");
+    var name = parts[0].split("=")[0].trim();
+    if (name === "") return "";
+    // A page must not be able to overwrite the gateway's own session.
+    if (SESSION !== "" && name === SESSION) return "";
+
+    var out = [parts[0]];
+    var domain = "";
+    var path = "/";
+    var secure = false;
+    var sameSiteNone = -1;
+    for (var i = 1; i < parts.length; i++) {
+      var piece = parts[i];
+      var eq = piece.indexOf("=");
+      var key = (eq < 0 ? piece : piece.slice(0, eq)).trim().toLowerCase();
+      var val = eq < 0 ? "" : piece.slice(eq + 1).trim();
+      if (key === "domain") {
+        domain = val;
+        continue; // this origin is not in that domain; the gateway keeps it
+      }
+      if (key === "path") {
+        path = val;
+        continue; // re-scoped below
+      }
+      if (key === "secure") {
+        secure = true;
+        if (location.protocol !== "https:") continue; // the browser leg is plain
+      }
+      if (key === "samesite" && val.toLowerCase() === "none") sameSiteNone = out.length;
+      out.push(piece);
+    }
+    // SameSite=None is only honoured together with Secure.
+    if (sameSiteNone >= 0 && !(secure && location.protocol === "https:")) {
+      out[sameSiteNone] = " SameSite=Lax";
+    }
+    out.push(" Path=" + cookiePath(path));
+
+    if (domain !== "") report(raw);
+    return out.join(";");
+  }
+
+  // report hands a domain-scoped cookie to the gateway's own jar, which is the
+  // only place a cookie for a whole domain can live behind one origin.
+  function report(raw) {
+    try {
+      fetch(COOKIE_URL, {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive: true,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ t: base.href, c: String(raw) }),
+      }).catch(function () {});
+    } catch (e) {}
+  }
+
+  (function () {
+    var proto = window.Document && Document.prototype;
+    var desc = proto && Object.getOwnPropertyDescriptor(proto, "cookie");
+    if (!desc || typeof desc.get !== "function" || typeof desc.set !== "function") return;
+    try {
+      Object.defineProperty(document, "cookie", {
+        configurable: true,
+        enumerable: !!desc.enumerable,
+        get: function () {
+          return desc.get.call(this);
+        },
+        set: function (raw) {
+          var next = rewriteCookie(raw);
+          if (next !== "") desc.set.call(this, next);
+        },
+      });
+    } catch (e) {}
+  })();
 
   // ---- history -------------------------------------------------------------
 

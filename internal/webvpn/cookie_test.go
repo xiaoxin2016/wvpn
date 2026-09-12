@@ -1,7 +1,10 @@
 package webvpn
 
 import (
+	"bytes"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
@@ -178,5 +181,58 @@ func TestProxyKeepsDomainCookiesServerSide(t *testing.T) {
 	h.rewriteCookies(resp2, anon)
 	if got := resp2.Header.Values("Set-Cookie"); len(got) != 1 {
 		t.Fatalf("anonymous cookies = %q", got)
+	}
+}
+
+// A page that writes its own cookie with a domain — a login handing the browser
+// an access token for the whole company domain — has nowhere to put it behind
+// one origin, so the shim reports it and the gateway keeps it in the jar.
+func TestPageWrittenDomainCookieReachesTheJar(t *testing.T) {
+	h := New(Options{SessionCookie: "wvsid", Guard: &Guard{AllowPrivate: true}})
+
+	post := func(target, cookie, session string) int {
+		body, _ := json.Marshal(map[string]string{"t": target, "c": cookie})
+		r := httptest.NewRequest(http.MethodPost, cookieRoute, bytes.NewReader(body))
+		if session != "" {
+			r.Header.Set("Cookie", "wvsid="+session)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code
+	}
+
+	if code := post("http://eiop.corp.example/uopsLogin/uopsLogin.do",
+		"accessToken=474ca9; domain=corp.example; path=/; max-age=43200", "browser-token"); code != http.StatusNoContent {
+		t.Fatalf("reporting the cookie gave %d", code)
+	}
+
+	// The other host in the same domain — the one the login response points at
+	// — now gets the token replayed to it.
+	other, _ := url.Parse("http://eiop-chn-slb-pj-4.corp.example/#/portal-setting/account")
+	pairs := jarPairs(h.jars.lookup(jarKey("browser-token")), other, nil)
+	if len(pairs) != 1 || pairs[0] != "accessToken=474ca9" {
+		t.Fatalf("the sibling host did not receive the token: %v", pairs)
+	}
+	// And a site outside that domain does not.
+	outside, _ := url.Parse("http://elsewhere.test/")
+	if pairs := jarPairs(h.jars.lookup(jarKey("browser-token")), outside, nil); len(pairs) != 0 {
+		t.Errorf("the token leaked outside its domain: %v", pairs)
+	}
+
+	// A page cannot use this to plant a cookie on a domain its own host is not
+	// part of, which is the rule a browser applies to a Domain attribute.
+	post("http://eiop.corp.example/", "planted=1; domain=victim.test", "browser-token")
+	victim, _ := url.Parse("http://www.victim.test/")
+	if pairs := jarPairs(h.jars.lookup(jarKey("browser-token")), victim, nil); len(pairs) != 0 {
+		t.Errorf("a cookie was planted on an unrelated domain: %v", pairs)
+	}
+
+	// Nor can it overwrite the gateway's own session.
+	post("http://eiop.corp.example/", "wvsid=stolen; domain=corp.example", "browser-token")
+	same, _ := url.Parse("http://eiop.corp.example/")
+	for _, p := range jarPairs(h.jars.lookup(jarKey("browser-token")), same, nil) {
+		if strings.HasPrefix(p, "wvsid=") {
+			t.Error("a page overwrote the gateway session cookie")
+		}
 	}
 }
