@@ -411,6 +411,20 @@ uopsAuthMap: { accessToken: "474ca9…", domain: "corp.example", cookieTime: 432
   或该浏览器当前所在文档判定归属，307 重定向回正确的网关地址，并在日志里记一行
   `stray GET /api/profile -> http://soc.corp.com/api/profile`，便于排查还有哪些地址逃逸。
 
+### `<base href>` 与相对地址的基准
+
+页面可以用 `<base href="/ZULXYAIK8642/__public/">` 把相对地址的基准挪到别处，浏览器是认这个的。
+基准差一段，相对地址就落到上一级目录去——`new URL("app/x.js", ".../__public")` 会把 `__public`
+整段丢掉，站点于是对一个明明存在的文件回 404。
+
+两侧都要认它：
+
+- **服务端 HTML 改写**按文档里声明的 `<base>` 解析其后的引用；`<base>` 自身的 href 则按**文档**
+  解析，而不是按它自己（否则 `<base href="__public/">` 会解析成 `__public/__public/`）。
+- **注入脚本**解析运行时的相对地址时以 `document.baseURI` 为准（它已计入 `<base href>`），
+  再映射回目标地址空间。此前它一律按文档自身的地址解析，单页应用在运行时动态加载的资源
+  （single-spa、webpack 的 publicPath 等）就会整段丢失路径。
+
 ### 应用自己的基路径，与 location.pathname
 
 有些站点自带一层基路径（`https://soc.corp.com/ZULXYAIK8642/`），并在启动时把自己导航到

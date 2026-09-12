@@ -249,3 +249,30 @@ func TestHTMLRewritesInlineScripts(t *testing.T) {
 		}
 	}
 }
+
+// A <base> moves where later references are measured from. Its own href is
+// measured from the document, not from itself.
+func TestBaseHrefMovesLaterReferences(t *testing.T) {
+	rw := Rewriter{Codec: PlainCodec{}}
+	base, _ := url.Parse("https://soc.corp.example/ZULXYAIK8642/")
+	src := []byte(`<html><head><base href="__public/">` +
+		`<script src="app/hexagon/js/router.js"></script></head>` +
+		`<body><a href="back">x</a></body></html>`)
+
+	got := string(rw.HTML(src, base, ""))
+
+	for _, want := range []string{
+		// The base itself is resolved against the document it appears in.
+		`<base href="/p/https/soc.corp.example/ZULXYAIK8642/__public/"`,
+		// Everything after it is measured from the base it declared.
+		`src="/p/https/soc.corp.example/ZULXYAIK8642/__public/app/hexagon/js/router.js"`,
+		`href="/p/https/soc.corp.example/ZULXYAIK8642/__public/back"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q\n---\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "__public/__public") {
+		t.Errorf("the base was resolved against itself:\n%s", got)
+	}
+}

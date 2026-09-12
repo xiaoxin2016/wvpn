@@ -80,6 +80,36 @@
     return gatewayScheme + "://" + host + u.pathname + u.search + u.hash;
   }
 
+  // refBase is what a relative reference is measured from. A page can move that
+  // with <base href>, and the browser honours it. Measuring from the document's
+  // own address instead quietly drops a path segment — the reference lands one
+  // directory up, and the site answers 404 for something that exists.
+  function refBase() {
+    var u;
+    try {
+      var b = document.baseURI;
+      if (!b) return base;
+      u = new URL(b);
+    } catch (e) {
+      return base;
+    }
+    // Only an address of the gateway's can be read back into the target's terms.
+    if (u.origin !== location.origin && !isGatewayHost(u.host)) return base;
+    try {
+      if (u.pathname.indexOf(PREFIX) === 0) {
+        var parts = u.pathname.slice(PREFIX.length).split("/");
+        if (parts.length < 2) return base;
+        return new URL(parts[0] + "://" + parts[1] + "/" +
+          parts.slice(2).join("/") + u.search);
+      }
+      // Under the sub-domain codec this origin belongs to the target, so the
+      // path is already the target's own.
+      return new URL(base.protocol + "//" + base.host + u.pathname + u.search);
+    } catch (e) {
+      return base;
+    }
+  }
+
   // rewrite maps one reference onto the gateway, returning the input unchanged
   // whenever it is already a gateway reference or cannot be proxied.
   function rewrite(ref) {
@@ -89,7 +119,7 @@
     if (s.indexOf(PREFIX) === 0) return ref;
     var u;
     try {
-      u = new URL(s, base);
+      u = new URL(s, refBase());
     } catch (e) {
       return ref;
     }

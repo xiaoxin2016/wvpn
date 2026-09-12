@@ -367,17 +367,21 @@ func (rw Rewriter) HTML(src []byte, base *url.URL, inject string) []byte {
 			inStyle = tt == html.StartTagToken && name == "style"
 			inScript = tt == html.StartTagToken && name == "script"
 
+			// A <base> moves where later references are measured from, and its
+			// own href is measured from the document, not from itself.
+			var declared *url.URL
 			if name == "base" {
 				if href, ok := baseHref(&tok); ok {
 					if abs, err := base.Parse(strings.TrimSpace(href)); err == nil && SchemeSupported(abs.Scheme) {
-						// Later references in this document resolve against the
-						// declared base, so follow it before rewriting it.
-						base = abs
+						declared = abs
 					}
 				}
 			}
 
 			changed, drop := rw.tag(&tok, base)
+			if declared != nil {
+				base = declared
+			}
 			switch {
 			case drop:
 				// omit
