@@ -77,6 +77,21 @@ func (p *pageMemory) record(key string, target *url.URL, document bool) *url.URL
 	return e.prev
 }
 
+// current returns the document a browser is on, without recording anything.
+func (p *pageMemory) current(key string) *url.URL {
+	if key == "" {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	e, ok := p.m[key]
+	if !ok {
+		return nil
+	}
+	e.touched = p.now()
+	return e.cur
+}
+
 func (p *pageMemory) sweepLocked(now time.Time) {
 	for k, e := range p.m {
 		if now.Sub(e.touched) > pageIdleTTL {

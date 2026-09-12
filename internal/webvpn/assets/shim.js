@@ -15,6 +15,13 @@
     return; // no target: nothing sensible to do
   }
 
+  var ASSETS = "/_wv/";
+  // The encoding in force. Only the plain form is ever produced here — it is
+  // served on every gateway host — but a page under another one still carries
+  // that codec's addresses, which must be recognised as the gateway's own.
+  var MODE = cfg.m || "plain";
+  // Mirror of the wrd path shape: /{scheme}[-{port}]/{hex}/...
+  var WRD_PATH = /^\/(?:http|https|ws|wss)(?:-[0-9]{1,5})?\/[0-9a-f]+(?:\/|$)/i;
   var OPAQUE = /^(data|blob|javascript|mailto|tel|sms|about|magnet|ftp|file|chrome|chrome-extension|intent):/i;
   var PROXYABLE = { "http:": 1, "https:": 1, "ws:": 1, "wss:": 1 };
 
@@ -37,6 +44,13 @@
     if (port) out += "-p" + port;
     if (tls) out += "-s";
     return out;
+  }
+
+  // A path is the gateway's own when it carries the prefix targets are encoded
+  // behind, or belongs to the gateway's assets.
+  function isGatewayPath(p) {
+    if (p.indexOf(PREFIX) === 0 || p.indexOf(ASSETS) === 0) return true;
+    return MODE === "wrd" && WRD_PATH.test(p);
   }
 
   function pathForm(u) {
@@ -76,7 +90,20 @@
     } catch (e) {
       return ref;
     }
-    if (u.origin === location.origin || isGatewayHost(u.host)) return ref; // already ours
+    if (u.origin === location.origin || isGatewayHost(u.host)) {
+      // Under the sub-domain codec this origin belongs to the target itself, so
+      // the address is already where it should be.
+      if (BASE !== "" || isGatewayPath(u.pathname)) return ref;
+      // Under the path codec every proxied page shares the gateway's origin, so
+      // an address a page built from location.origin names the gateway rather
+      // than the site — and the gateway has nothing at that path. Read it as
+      // what the page meant: the same path on the site the page came from.
+      try {
+        u = new URL(u.pathname + u.search + u.hash, base);
+      } catch (e) {
+        return ref;
+      }
+    }
     var enc = encode(u);
     return enc === null ? ref : enc;
   }

@@ -301,3 +301,39 @@ func TestDocumentRequests(t *testing.T) {
 		})
 	}
 }
+
+func TestStrayRecoveryWithoutAReferer(t *testing.T) {
+	origin := originServer(t)
+	gw, client := gatewayFor(t, Options{})
+	host := originHost(t, origin)
+
+	// A browser that has not been seen cannot be attributed to anything.
+	resp, _ := get(t, client, gw.URL+"/api/profile", map[string]string{
+		"User-Agent": "unseen-browser",
+	})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("an unattributable stray gave %d, want 404", resp.StatusCode)
+	}
+
+	// Once the browser is reading a page, a request that escaped rewriting is
+	// recovered from that page even with the Referer suppressed.
+	if resp, _ = get(t, client, gw.URL+"/p/http/"+host+"/", document); resp.StatusCode != http.StatusOK {
+		t.Fatalf("opening the site: %d", resp.StatusCode)
+	}
+	resp, _ = get(t, client, gw.URL+"/api/profile", nil)
+	if resp.StatusCode != http.StatusTemporaryRedirect {
+		t.Fatalf("stray status = %d, want a redirect into the site", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Location"), "/p/http/"+host+"/api/profile"; got != want {
+		t.Errorf("stray Location = %q, want %q", got, want)
+	}
+
+	// The Referer still wins when there is one: it names the page exactly.
+	other := originServer(t)
+	resp, _ = get(t, client, gw.URL+"/api/profile", map[string]string{
+		"Referer": gw.URL + "/p/http/" + originHost(t, other) + "/dir/page",
+	})
+	if got, want := resp.Header.Get("Location"), "/p/http/"+originHost(t, other)+"/api/profile"; got != want {
+		t.Errorf("with a Referer, Location = %q, want %q", got, want)
+	}
+}
