@@ -71,6 +71,9 @@ type Handler struct {
 	trust *trustStore
 	// jars hold the domain-scoped cookies that single sign-on depends on.
 	jars *sessionJars
+	// pages remember where each browser is, for requests that carry the
+	// gateway's bare origin and no Referer to explain it.
+	pages *pageMemory
 }
 
 type ctxKey struct{}
@@ -84,6 +87,9 @@ type reqInfo struct {
 	site SiteCheck
 	// jarKey identifies the browser's server-side cookie jar.
 	jarKey string
+	// page is the real address of the document this request belongs to, as far
+	// as the gateway can tell. It is what the gateway's bare origin stands for.
+	page *url.URL
 }
 
 func withInfo(ctx context.Context, info *reqInfo) context.Context {
@@ -137,6 +143,7 @@ func New(opts Options) *Handler {
 		log:   opts.Logger,
 		trust: newTrustStore(),
 		jars:  newSessionJars(),
+		pages: newPageMemory(),
 	}
 
 	dialer := &net.Dialer{
@@ -296,6 +303,7 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 		site:   check,
 		jarKey: h.sessionKey(r),
 	}
+	info.page = h.pages.record(h.browserKey(r), target, isDocumentRequest(r))
 	h.rp.ServeHTTP(w, r.WithContext(withInfo(r.Context(), info)))
 }
 

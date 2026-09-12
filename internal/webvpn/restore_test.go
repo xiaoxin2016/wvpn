@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ssoOrigin stands in for an identity provider: it accepts exactly one return
@@ -178,6 +179,124 @@ func TestRestoreQueryForms(t *testing.T) {
 			got := h.restoreQuery(tc.in, page, "sso-corp-com-s.intra.corp.com")
 			if got != tc.want {
 				t.Errorf("restoreQuery(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// appOrigin stands in for the application the user actually wanted, and is the
+// address the identity provider has on file.
+func appOrigin(t *testing.T) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		io.WriteString(w, "<html><body>app</body></html>")
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// document is what a browser sends when it navigates to a new top-level page.
+var document = map[string]string{
+	"Sec-Fetch-Dest": "document",
+	"Accept":         "text/html",
+}
+
+func TestRestoresWithoutARefererFromTheBrowsersTrail(t *testing.T) {
+	app := appOrigin(t)
+	sso := ssoOrigin(t, "http://"+originHost(t, app))
+	gw, client := gatewayFor(t, Options{})
+
+	// The browser opens the application, which is what a Referer would have
+	// named had the site not suppressed it.
+	resp, _ := get(t, client, gw.URL+"/p/http/"+originHost(t, app)+"/", document)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("opening the application: %d", resp.StatusCode)
+	}
+
+	// It then navigates to the provider carrying location.origin — the bare
+	// gateway address — and no Referer at all.
+	resp, body := get(t, client, gw.URL+"/p/http/"+originHost(t, sso)+"/authorize"+
+		"?redirect_uri="+url.QueryEscape(gw.URL)+"&state=s", document)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, body = %q", resp.StatusCode, body)
+	}
+}
+
+func TestPageMemoryAttributesRequests(t *testing.T) {
+	pages := newPageMemory()
+	app, _ := url.Parse("http://app.corp.test/home")
+	idp, _ := url.Parse("http://sso.corp.test/authorize")
+
+	// The first document a browser opens has nothing behind it.
+	if got := pages.record("b1", app, true); got != nil {
+		t.Errorf("first navigation attributed to %v, want nothing", got)
+	}
+	// Anything that page fetches for itself belongs to that page.
+	if got := pages.record("b1", idp, false); got == nil || got.Host != "app.corp.test" {
+		t.Errorf("sub-resource attributed to %v, want the application", got)
+	}
+	// Navigating on is attributed to the page that started it.
+	if got := pages.record("b1", idp, true); got == nil || got.Host != "app.corp.test" {
+		t.Errorf("navigation attributed to %v, want the application", got)
+	}
+	// And the trail moves along with the browser.
+	if got := pages.record("b1", app, true); got == nil || got.Host != "sso.corp.test" {
+		t.Errorf("second navigation attributed to %v, want the provider", got)
+	}
+	// One browser's trail says nothing about another's.
+	if got := pages.record("b2", idp, true); got != nil {
+		t.Errorf("a second browser inherited %v", got)
+	}
+	// A browser that cannot be identified is not tracked at all.
+	if got := pages.record("", app, true); got != nil {
+		t.Errorf("an unkeyed request was attributed to %v", got)
+	}
+}
+
+func TestPageMemoryForgetsIdleBrowsers(t *testing.T) {
+	pages := newPageMemory()
+	now := time.Now()
+	pages.now = func() time.Time { return now }
+	app, _ := url.Parse("http://app.corp.test/home")
+	idp, _ := url.Parse("http://sso.corp.test/authorize")
+
+	pages.record("b1", app, true)
+	now = now.Add(pageIdleTTL + time.Minute)
+	// The sweep runs when a browser is first seen, so a new one triggers it.
+	pages.record("b2", app, true)
+	if _, ok := pages.m["b1"]; ok {
+		t.Error("an idle browser was kept")
+	}
+	if got := pages.record("b1", idp, true); got != nil {
+		t.Errorf("a forgotten browser came back with %v", got)
+	}
+}
+
+func TestDocumentRequests(t *testing.T) {
+	cases := []struct {
+		name    string
+		headers map[string]string
+		method  string
+		want    bool
+	}{
+		{"navigation", map[string]string{"Sec-Fetch-Dest": "document"}, "GET", true},
+		{"fetch", map[string]string{"Sec-Fetch-Dest": "empty"}, "GET", false},
+		{"image", map[string]string{"Sec-Fetch-Dest": "image"}, "GET", false},
+		{"frame", map[string]string{"Sec-Fetch-Dest": "iframe"}, "GET", false},
+		{"form post", map[string]string{"Sec-Fetch-Dest": "document"}, "POST", true},
+		{"old browser navigating", map[string]string{"Accept": "text/html,*/*"}, "GET", true},
+		{"old browser fetching", map[string]string{"Accept": "application/json"}, "GET", false},
+		{"api call", map[string]string{"Accept": "text/html"}, "PUT", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(tc.method, "/", nil)
+			for k, v := range tc.headers {
+				r.Header.Set(k, v)
+			}
+			if got := isDocumentRequest(r); got != tc.want {
+				t.Errorf("isDocumentRequest = %v, want %v", got, tc.want)
 			}
 		})
 	}

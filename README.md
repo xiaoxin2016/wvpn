@@ -321,10 +321,22 @@ OIDC 的 `redirect_uri`、CAS 的 `service`、SAML 的 `RelayState`。这个值�
 | --- | --- |
 | `https://soc-corp-com-s.intra.corp.com/cb`（子域形式） | `https://soc.corp.com/cb` |
 | `https://app.intra.corp.com/p/https/soc.corp.com/cb`（路径形式） | `https://soc.corp.com/cb` |
-| `https://app.intra.corp.com/cb`（裸网关地址，即 `location.origin`） | 按 `Referer` 判定当前页面所属站点 |
+| `https://app.intra.corp.com/cb`（裸网关地址，即 `location.origin`） | 判定当前页面所属站点，见下 |
 
 作用范围：查询串，以及 `application/x-www-form-urlencoded` 请求体（SAML/CAS 常用 POST 绑定，上限 1 MB）。
-只改动值中**属于网关**的绝对地址，参数名、顺序与其余取值原样保留；不是网关的地址不动。
+只改动值中**属于网关**的绝对地址，参数名、顺序与其余取值原样保留；不是网关的地址不动——登录表单里
+`execution`、`authentication-session-id`、用户名口令这类参数不含地址，一个字节都不会被碰。
+
+**裸网关地址怎么判定来源。** 子域形式与路径形式都自带目标，精确解码即可；只有 `location.origin`
+这种裸地址什么都不带——路径模式下所有被代理的页面共用一个源，地址本身说明不了它代表哪个站点。
+依次用两条线索：
+
+1. **`Referer`**：最准，指明发起请求的正是哪个页面（含 iframe 内的页面）。
+2. **该浏览器的访问轨迹**：不少企业系统会关掉 Referer（`Referrer-Policy: no-referrer`），此时按
+   网关为每个浏览器记的**前后两个文档**判定——子资源归属当前文档，跳转到新文档则归属它的上一个文档。
+   轨迹按登录会话隔离（未开登录时按来源 IP + User-Agent），空闲 2 小时回收，只在内存中。
+
+两条都没有（浏览器开局第一条请求就直奔 SSO）时退回目标站点自身——此时来源本就无从得知。
 
 后台“单点登录”一节控制它：默认**全部站点**生效（参数里出现网关地址本就不是源站期望的形态），
 也可以改为**按域名**只对 `sso.corp.com` 这类身份提供方生效，或整体关闭。
@@ -447,6 +459,7 @@ internal/webvpn/proxy.go    ReverseProxy 装配、请求/响应改写、Cookie �
 internal/webvpn/guard.go    目标策略：启动参数硬边界 + 后台站点清单 + 反 DNS 重绑定
 internal/webvpn/tls.go      自定义 TLS 拨号：证书验证失败转为询问，确认后按指纹固定信任
 internal/webvpn/restore.go  请求参数中的网关地址还原为真实地址（SSO 回跳）
+internal/webvpn/pages.go    每个浏览器的访问轨迹，用于判定裸网关地址代表哪个站点
 internal/webvpn/cookie.go   Cookie 按原始字节改写（不经 Go 的 cookie 解析/序列化）
 internal/webvpn/jar.go      域级 Cookie 的服务端存放，按登录会话隔离
 internal/webvpn/portal.go   门户页

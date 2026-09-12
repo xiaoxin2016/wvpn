@@ -29,10 +29,14 @@ var absURLRe = regexp.MustCompile(`(?i)https?://[^\s"'<>\\]+`)
 const maxRestoreBody = 1 << 20
 
 // browserPage is the real address of the page the request was made from. It is
-// what a bare gateway origin in a parameter stands for, and only the Referer
-// can say which site that is: under the path codec every proxied page shares
-// one origin. The target itself is the fallback, which is right whenever the
-// request is same-site.
+// what a bare gateway origin in a parameter stands for, and under the path
+// codec the address alone cannot say which site that is: every proxied page
+// shares one origin.
+//
+// The Referer answers it exactly and is tried first. A site that suppresses the
+// Referer falls back to the trail the gateway keeps for this browser, and a
+// browser with no trail yet falls back to the target, which is right whenever
+// the request is same-site.
 func (h *Handler) browserPage(info *reqInfo, in *http.Request) *url.URL {
 	if ref := in.Header.Get("Referer"); ref != "" {
 		if u, err := url.Parse(ref); err == nil && u.Host != "" {
@@ -40,6 +44,9 @@ func (h *Handler) browserPage(info *reqInfo, in *http.Request) *url.URL {
 				return t
 			}
 		}
+	}
+	if info.page != nil {
+		return info.page
 	}
 	return info.target
 }
