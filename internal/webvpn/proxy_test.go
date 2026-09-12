@@ -386,8 +386,10 @@ func TestProxyRewritesScriptBodies(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
-	if !strings.Contains(body, `location.href = "/p/http/`+host+`/next"`) {
-		t.Errorf("script navigation was not rewritten: %s", body)
+	// An absolute address stays absolute: a script does arithmetic on the
+	// strings it holds, and turning one into a path changes the answer.
+	if !strings.Contains(body, `location.href = "`+gw.URL+`/p/http/`+host+`/next"`) {
+		t.Errorf("script navigation was not rewritten absolutely: %s", body)
 	}
 	if !strings.Contains(body, `"https://cdn.other.example/l.js"`) {
 		t.Errorf("an unrelated host was rewritten: %s", body)

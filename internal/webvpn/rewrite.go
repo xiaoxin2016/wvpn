@@ -50,6 +50,9 @@ type Rewriter struct {
 	Codec Codec
 	// Scope bounds the rewriting of absolute URLs inside scripts.
 	Scope JSScope
+	// Origin is the gateway as the browser reaches it ("https://app.intra.corp.com").
+	// Scripts are rewritten against it so an absolute address stays absolute.
+	Origin string
 }
 
 // Ref resolves a URL reference found in a document against base and maps it into
@@ -129,6 +132,14 @@ var jsOriginRe = regexp.MustCompile(`(?i)\b(https?):(\\?/\\?/)([a-z0-9._-]+(?::[
 // only chance to keep such a navigation inside the tunnel is to have rewritten
 // the address before the script ever runs. Only the scheme and host are
 // replaced; whatever follows is already a path.
+//
+// The replacement keeps the shape of what it replaces. A script holds addresses
+// as strings and does arithmetic on them — joins them onto a base path, feeds
+// them to a router, compares them — and an absolute address turned into a
+// relative one changes the answer: a bundle that joined its own base onto an
+// address it used to use whole ends up asking for base + gateway path. So an
+// absolute address is replaced by an absolute one whenever the gateway's own
+// origin is known.
 func (rw Rewriter) JS(src string, base *url.URL) string {
 	if rw.Scope == JSOff || base == nil || src == "" {
 		return src
@@ -143,7 +154,13 @@ func (rw Rewriter) JS(src string, base *url.URL) string {
 		if enc == "" {
 			return m
 		}
-		return strings.TrimSuffix(enc, "/")
+		enc = strings.TrimSuffix(enc, "/")
+		// The path codecs encode into a path; prefixing the gateway's origin
+		// restores the absolute form. The sub-domain codec is already absolute.
+		if rw.Origin != "" && strings.HasPrefix(enc, "/") {
+			return rw.Origin + enc
+		}
+		return enc
 	})
 }
 

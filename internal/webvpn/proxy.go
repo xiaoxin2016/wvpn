@@ -90,6 +90,9 @@ type reqInfo struct {
 	// page is the real address of the document this request belongs to, as far
 	// as the gateway can tell. It is what the gateway's bare origin stands for.
 	page *url.URL
+	// browserHost is the gateway host the browser asked, which is the only way
+	// to name the gateway in an address a script will hold on to.
+	browserHost string
 }
 
 func withInfo(ctx context.Context, info *reqInfo) context.Context {
@@ -110,11 +113,12 @@ func siteCheckFrom(ctx context.Context) SiteCheck {
 }
 
 const (
-	shimPath   = "/_wv/shim.js"
-	gotoPath   = "/_wv/go"
-	trustPath  = "/_wv/trust"
-	assetPath  = "/_wv/"
-	portalPath = "/"
+	shimPath    = "/_wv/shim.js"
+	gotoPath    = "/_wv/go"
+	trustPath   = "/_wv/trust"
+	cookieRoute = "/_wv/cookie"
+	assetPath   = "/_wv/"
+	portalPath  = "/"
 )
 
 // New builds a gateway Handler.
@@ -199,9 +203,24 @@ func (h *Handler) restores(target *url.URL) bool {
 	return h.opts.RestoreFor(target)
 }
 
-// rewriter builds a rewriter for the codec currently in force.
-func (h *Handler) rewriter() Rewriter {
-	return Rewriter{Codec: h.codec(), Scope: h.opts.JSScope}
+// rewriter builds a rewriter for the codec currently in force. info carries the
+// gateway origin the browser is using, which scripts are rewritten against; it
+// may be nil where no request is in hand.
+func (h *Handler) rewriter(info *reqInfo) Rewriter {
+	return Rewriter{Codec: h.codec(), Scope: h.opts.JSScope, Origin: info.gatewayOrigin()}
+}
+
+// gatewayOrigin is the gateway as this browser reaches it, or "" when it is not
+// known.
+func (info *reqInfo) gatewayOrigin() string {
+	if info == nil || info.browserHost == "" {
+		return ""
+	}
+	scheme := "http"
+	if info.secure {
+		scheme = "https"
+	}
+	return scheme + "://" + info.browserHost
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -215,6 +234,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.serveGoto(w, r)
 	case path == trustPath:
 		h.serveTrust(w, r)
+	case path == cookieRoute:
+		h.serveCookie(w, r)
 	case strings.HasPrefix(path, assetPath):
 		http.NotFound(w, r)
 	case h.plain.Match(r.Host, path):
@@ -288,6 +309,55 @@ func (h *Handler) strayBase(r *http.Request) *url.URL {
 	return h.pages.current(h.browserKey(r))
 }
 
+// serveCookie takes a cookie a page wrote through document.cookie and, when it
+// names a domain, keeps it in that browser's jar — the same place a Set-Cookie
+// header with a Domain attribute goes. The page keeps its own copy for the site
+// it is on; this is what carries the cookie to the other hosts in the domain,
+// which behind one origin the browser cannot do.
+func (h *Handler) serveCookie(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "只接受 POST", http.StatusMethodNotAllowed)
+		return
+	}
+	var in struct {
+		Target string `json:"t"`
+		Cookie string `json:"c"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in); err != nil {
+		http.Error(w, "无法解析请求", http.StatusBadRequest)
+		return
+	}
+	target, err := url.Parse(in.Target)
+	if err != nil || target.Host == "" || !SchemeSupported(target.Scheme) {
+		http.Error(w, "目标地址无效", http.StatusBadRequest)
+		return
+	}
+	if _, err := h.opts.Guard.CheckTarget(target.Host, h.siteExempt(r)); err != nil {
+		http.Error(w, "目标被网关策略拒绝", http.StatusForbidden)
+		return
+	}
+
+	// Nothing below is an error the page can act on: a cookie the jar will not
+	// take is simply one the browser's own copy has to carry.
+	w.WriteHeader(http.StatusNoContent)
+
+	sc, ok := parseSetCookie(in.Cookie)
+	if !ok || sc.Name == h.opts.SessionCookie {
+		return
+	}
+	// Only a cookie the target itself could have set is accepted, which is the
+	// rule a browser applies to a Domain attribute.
+	if toJar, _ := sc.domainScope(target); !toJar {
+		return
+	}
+	key := h.sessionKey(r)
+	if key == "" {
+		return // no signed-in browser to attach a jar to
+	}
+	storeShared(h.jars.get(key), target, []*http.Cookie{sc.toHTTPCookie()})
+}
+
 // decode resolves an inbound request with whichever codec claims it.
 func (h *Handler) decode(host, path, query string) (*url.URL, error) {
 	if h.plain.Match(host, path) {
@@ -308,10 +378,11 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 		return
 	}
 	info := &reqInfo{
-		target: target,
-		secure: isSecureRequest(r),
-		site:   check,
-		jarKey: h.sessionKey(r),
+		target:      target,
+		secure:      isSecureRequest(r),
+		site:        check,
+		jarKey:      h.sessionKey(r),
+		browserHost: r.Host,
 	}
 	info.page = h.pages.record(h.browserKey(r), target, isDocumentRequest(r))
 	h.rp.ServeHTTP(w, r.WithContext(withInfo(r.Context(), info)))
@@ -438,7 +509,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 
 	if link := resp.Header.Get("Link"); link != "" {
 		resp.Header.Set("Link", linkURLRe.ReplaceAllStringFunc(link, func(m string) string {
-			if r := h.rewriter().Ref(m[1:len(m)-1], target); r != "" {
+			if r := h.rewriter(info).Ref(m[1:len(m)-1], target); r != "" {
 				return "<" + r + ">"
 			}
 			return m
@@ -451,7 +522,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 	if resp.StatusCode == http.StatusSwitchingProtocols {
 		return nil
 	}
-	return h.rewriteBody(resp, target)
+	return h.rewriteBody(resp, info)
 }
 
 // rewriteCookies re-scopes Set-Cookie onto the gateway. Under the path codecs,
@@ -510,7 +581,8 @@ func (h *Handler) cookiePath(target *url.URL, path string) string {
 	return "/"
 }
 
-func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
+func (h *Handler) rewriteBody(resp *http.Response, info *reqInfo) error {
+	target := info.target
 	kind := bodyKind(resp.Header.Get("Content-Type"))
 	if kind == bodyScript && h.opts.JSScope == JSOff {
 		kind = bodyOther
@@ -553,11 +625,11 @@ func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
 	var out []byte
 	switch kind {
 	case bodyHTML:
-		out = h.rewriter().HTML(buf, target, h.inject(target))
+		out = h.rewriter(info).HTML(buf, target, h.inject(target))
 	case bodyCSS:
-		out = []byte(h.rewriter().CSS(string(buf), target))
+		out = []byte(h.rewriter(info).CSS(string(buf), target))
 	case bodyScript:
-		out = []byte(h.rewriter().JS(string(buf), target))
+		out = []byte(h.rewriter(info).JS(string(buf), target))
 	}
 
 	resp.Body = io.NopCloser(bytes.NewReader(out))
@@ -572,6 +644,9 @@ func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
 // that is already a gateway address.
 func (h *Handler) inject(target *url.URL) string {
 	conf := map[string]string{"p": PlainPrefix, "t": target.String(), "m": h.codec().Name()}
+	if name := h.opts.SessionCookie; name != "" {
+		conf["c"] = name
+	}
 	if hc, ok := h.codec().(*HostCodec); ok {
 		conf["b"] = hc.Base
 		conf["port"] = hc.Port

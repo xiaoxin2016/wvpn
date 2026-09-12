@@ -341,6 +341,24 @@ OIDC 的 `redirect_uri`、CAS 的 `service`、SAML 的 `RelayState`。这个值�
 后台“单点登录”一节控制它：默认**全部站点**生效（参数里出现网关地址本就不是源站期望的形态），
 也可以改为**按域名**只对 `sso.corp.com` 这类身份提供方生效，或整体关闭。
 
+### 页面自己写的 Cookie
+
+登录接口把令牌连同**域名和有效期**一起交给前端，由前端 `document.cookie` 自己写下——这是很常见的一种做法：
+
+```
+uopsAuthMap: { accessToken: "474ca9…", domain: "corp.example", cookieTime: 43200 }
+```
+
+浏览器只接受当前主机所属域的 `domain=`。页面经网关后位于网关主机上，不属于 `corp.example`，
+这条写入会被**静默丢弃**——下一个请求便没有令牌，站点回"登录态已过期，请重新登录"。
+所以注入脚本接管 `document.cookie` 的写入，按网关改写 `Set-Cookie` 的同一套规则翻译：
+
+- `path` 改写到该目标在网关下的路径，站点之间不会互相看到 Cookie；
+- 浏览器这一段是明文时去掉 `Secure`，`SameSite=None` 随之降为 `Lax`（否则浏览器整条丢弃）；
+- 带 `domain=` 的另外交给网关的**域级 Cookie 罐**（`POST /_wv/cookie`），由它回放给该域下的其他主机——
+  这正是 `userCenter` 指向同域另一台主机时仍能认这个令牌的原因。网关只接受目标自身能设置的域，
+  且拒绝任何试图覆盖网关会话 Cookie 的写入。
+
 ### location.origin 拼出来的地址
 
 页面脚本极常见的一种写法：`fetch(location.origin + '/api/profile')`。在**路径模式**与**加密路径模式**下，
@@ -375,6 +393,14 @@ location.href = "http://sso.intra.com/login"
 
 之所以默认只改同域：脚本里的绝对地址未必是导航目标，也可能是用来比较的字符串，改写范围越大误伤越多。
 只替换 `scheme://host` 部分，其后路径原样保留。
+
+**改写保形：绝对地址仍是绝对地址。** 脚本会对它持有的地址做运算——拼到基路径后面、交给路由、拿去比较。
+把绝对地址换成根相对路径会改变运算结果：常见的加载器写法是"绝对地址直接用，相对地址才拼自己的基路径"，
+于是 `https://soc.corp.com/app/x.js` 变成 `/p/https/soc.corp.com/app/x.js` 后被当成相对地址，
+拼出 `/ZULXYAIK8642/p/https/soc.corp.com/app/x.js` 这种双重编码的地址，站点按 SPA 兜底回一个 HTML，
+浏览器便报 `Refused to execute script … MIME type ('text/html') is not executable`。
+所以脚本里的绝对地址改写为**带网关源的绝对地址**（`https://app.intra.corp.com/p/https/soc.corp.com/…`）。
+HTML 属性不受影响——那里由浏览器按文档解析，根相对形式更短也更稳。
 
 两条路径实测（A/B 对照，浏览器真实执行）：
 
