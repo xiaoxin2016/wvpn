@@ -5,6 +5,8 @@
 package store
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Config is the whole persisted configuration. The JSON shape is flat and
@@ -42,6 +45,61 @@ type Config struct {
 	SMTP SMTP `json:"smtp"`
 	// Gateway is how target addresses are expressed in the browser.
 	Gateway Gateway `json:"gateway"`
+	// TLS is the certificate the gateway serves to browsers.
+	TLS TLS `json:"tls"`
+}
+
+// TLS is the gateway's own certificate and private key, both PEM encoded. A
+// sub-domain deployment needs a wildcard certificate for the domain targets are
+// addressed under, so it is configured here rather than only as files on disk.
+//
+// The key is stored as written, in the same 0600 file as everything else.
+type TLS struct {
+	Cert string `json:"cert"`
+	Key  string `json:"key"`
+}
+
+// Configured reports whether both halves are present.
+func (t TLS) Configured() bool { return t.Cert != "" && t.Key != "" }
+
+// Certificate parses the pair, which is also how it is validated.
+func (t TLS) Certificate() (tls.Certificate, error) {
+	return tls.X509KeyPair([]byte(t.Cert), []byte(t.Key))
+}
+
+// CertSummary is what the console shows about a configured certificate: enough
+// to tell whether it is the right one and whether it is still valid.
+type CertSummary struct {
+	Subject   string   `json:"subject"`
+	Issuer    string   `json:"issuer"`
+	DNSNames  []string `json:"dns_names"`
+	NotBefore string   `json:"not_before"`
+	NotAfter  string   `json:"not_after"`
+	Expired   bool     `json:"expired"`
+}
+
+// Summary parses the certificate for display.
+func (t TLS) Summary() (CertSummary, error) {
+	pair, err := t.Certificate()
+	if err != nil {
+		return CertSummary{}, err
+	}
+	leaf := pair.Leaf
+	if leaf == nil {
+		leaf, err = x509.ParseCertificate(pair.Certificate[0])
+		if err != nil {
+			return CertSummary{}, err
+		}
+	}
+	now := time.Now()
+	return CertSummary{
+		Subject:   leaf.Subject.String(),
+		Issuer:    leaf.Issuer.String(),
+		DNSNames:  leaf.DNSNames,
+		NotBefore: leaf.NotBefore.Local().Format("2006-01-02 15:04"),
+		NotAfter:  leaf.NotAfter.Local().Format("2006-01-02 15:04"),
+		Expired:   now.After(leaf.NotAfter) || now.Before(leaf.NotBefore),
+	}, nil
 }
 
 // URL modes. See the Codec implementations in the webvpn package.
@@ -59,12 +117,31 @@ const (
 type Gateway struct {
 	// URLMode is one of URLPlain, URLWRD or URLSubdomain.
 	URLMode string `json:"url_mode"`
-	// BaseDomain is the wildcard domain used by URLSubdomain, e.g.
-	// "app.intra.corp.com" with *.app.intra.corp.com pointed at the gateway.
+	// BaseDomain is the wildcard domain targets are addressed under, e.g.
+	// "intra.corp.com" with *.intra.corp.com pointed at the gateway.
 	BaseDomain string `json:"base_domain"`
+	// Host is where the portal, sign-in and admin pages live. It is normally a
+	// name inside BaseDomain, and defaults to "app." + BaseDomain.
+	Host string `json:"host"`
 	// PublicPort is the port browsers reach the gateway on, when it is not the
 	// default for the scheme.
 	PublicPort string `json:"public_port"`
+}
+
+// DefaultHostLabel is the first label of the portal's own name when none is
+// configured: with a wildcard on intra.corp.com the portal is app.intra.corp.com.
+const DefaultHostLabel = "app"
+
+// PortalHost returns the name the portal answers on, which is derived from the
+// wildcard domain unless it was set explicitly.
+func (g Gateway) PortalHost() string {
+	if g.Host != "" {
+		return g.Host
+	}
+	if g.BaseDomain == "" {
+		return ""
+	}
+	return DefaultHostLabel + "." + g.BaseDomain
 }
 
 // Mode returns the configured URL mode, defaulting to plain.
@@ -242,7 +319,11 @@ func normalizeConfig(c Config) Config {
 	// rejecting, and Mode() supplies the default when the field is empty.
 	c.Gateway.URLMode = strings.ToLower(strings.TrimSpace(c.Gateway.URLMode))
 	c.Gateway.BaseDomain = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.BaseDomain), "."))
+	c.Gateway.Host = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.Host), "."))
 	c.Gateway.PublicPort = strings.TrimSpace(c.Gateway.PublicPort)
+
+	c.TLS.Cert = strings.TrimSpace(c.TLS.Cert)
+	c.TLS.Key = strings.TrimSpace(c.TLS.Key)
 
 	c.SMTP.Addr = strings.TrimSpace(c.SMTP.Addr)
 	c.SMTP.From = strings.TrimSpace(c.SMTP.From)
@@ -291,7 +372,11 @@ func (c Config) clone() Config {
 	// rejecting, and Mode() supplies the default when the field is empty.
 	c.Gateway.URLMode = strings.ToLower(strings.TrimSpace(c.Gateway.URLMode))
 	c.Gateway.BaseDomain = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.BaseDomain), "."))
+	c.Gateway.Host = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.Host), "."))
 	c.Gateway.PublicPort = strings.TrimSpace(c.Gateway.PublicPort)
+
+	c.TLS.Cert = strings.TrimSpace(c.TLS.Cert)
+	c.TLS.Key = strings.TrimSpace(c.TLS.Key)
 
 	c.SMTP.Addr = strings.TrimSpace(c.SMTP.Addr)
 	c.SMTP.From = strings.TrimSpace(c.SMTP.From)
@@ -345,6 +430,9 @@ func Validate(c Config) error {
 	if err := validateGateway(c.Gateway); err != nil {
 		return err
 	}
+	if err := validateTLS(c.TLS); err != nil {
+		return err
+	}
 	return validateSMTP(c.SMTP)
 }
 
@@ -362,14 +450,37 @@ func validateGateway(g Gateway) error {
 			return fmt.Errorf("网关域名需要是完整域名，例如 app.intra.corp.com")
 		}
 	}
+	if g.Host != "" {
+		if !domainRe.MatchString(g.Host) || !strings.Contains(g.Host, ".") {
+			return fmt.Errorf("门户主机名 %q 不是合法的域名", g.Host)
+		}
+		if g.BaseDomain != "" && g.Host != g.BaseDomain && !strings.HasSuffix(g.Host, "."+g.BaseDomain) {
+			return fmt.Errorf("门户主机名 %q 需要位于泛域名 %q 之内", g.Host, g.BaseDomain)
+		}
+	}
 	if g.Mode() == URLSubdomain && g.BaseDomain == "" {
-		return fmt.Errorf("子域名模式需要填写网关域名（并把 *.该域名 解析到网关）")
+		return fmt.Errorf("子域名模式需要填写泛域名（并把 *.该域名 解析到网关）")
 	}
 	if g.PublicPort != "" {
 		n, err := strconv.Atoi(g.PublicPort)
 		if err != nil || n < 1 || n > 65535 {
 			return fmt.Errorf("对外端口 %q 不合法", g.PublicPort)
 		}
+	}
+	return nil
+}
+
+func validateTLS(t TLS) error {
+	switch {
+	case t.Cert == "" && t.Key == "":
+		return nil
+	case t.Cert == "":
+		return fmt.Errorf("只填写了私钥，还需要证书")
+	case t.Key == "":
+		return fmt.Errorf("只填写了证书，还需要私钥")
+	}
+	if _, err := t.Certificate(); err != nil {
+		return fmt.Errorf("证书与私钥不可用: %w", err)
 	}
 	return nil
 }

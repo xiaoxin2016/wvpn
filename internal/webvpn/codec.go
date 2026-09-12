@@ -290,8 +290,13 @@ func (c *WRDCodec) Decode(_, escapedPath, rawQuery string) (*url.URL, error) {
 // Targets on a non-default port cannot be expressed this way; those fall back to
 // the plain path form, which every gateway host also serves.
 type HostCodec struct {
-	// Base is the wildcard domain, e.g. "webvpn.example.com".
+	// Base is the wildcard domain targets are addressed under, e.g.
+	// "intra.corp.com" with *.intra.corp.com pointed at the gateway.
 	Base string
+	// Portal is the name the gateway's own pages answer on. It normally sits
+	// inside Base — app.intra.corp.com — so it has to be kept out of the
+	// target space.
+	Portal string
 	// Port is the port the gateway is reachable on, "" for the scheme default.
 	Port string
 	// TLS reports whether the gateway itself is served over https.
@@ -300,14 +305,23 @@ type HostCodec struct {
 	fallback PlainCodec
 }
 
-// NewHostCodec validates base and builds a HostCodec.
-func NewHostCodec(base, port string, tls bool) (*HostCodec, error) {
+// NewHostCodec validates the domain and builds a HostCodec. portal is where the
+// gateway's own pages live; empty means the default label inside base.
+func NewHostCodec(base, portal, port string, tls bool) (*HostCodec, error) {
 	base = strings.ToLower(strings.Trim(strings.TrimSpace(base), "."))
 	if base == "" || !strings.Contains(base, ".") {
-		return nil, errors.New("webvpn: -base-domain must be a domain such as webvpn.example.com")
+		return nil, errors.New("webvpn: the wildcard domain must be a domain such as intra.corp.com")
 	}
-	return &HostCodec{Base: base, Port: port, TLS: tls}, nil
+	portal = strings.ToLower(strings.Trim(strings.TrimSpace(portal), "."))
+	if portal == "" {
+		portal = DefaultPortalLabel + "." + base
+	}
+	return &HostCodec{Base: base, Portal: portal, Port: port, TLS: tls}, nil
 }
+
+// DefaultPortalLabel is the first label of the portal's own name when none is
+// configured.
+const DefaultPortalLabel = "app"
 
 func (*HostCodec) Name() string { return "subdomain" }
 
@@ -316,6 +330,9 @@ func (c *HostCodec) Match(host, escapedPath string) bool {
 		return false // handled by the plain codec
 	}
 	h := hostOnly(host)
+	if h == c.Portal {
+		return false // the gateway's own pages, not a target
+	}
 	return strings.HasSuffix(h, "."+c.Base) && len(h) > len(c.Base)+1
 }
 
@@ -402,6 +419,11 @@ func (c *HostCodec) Encode(u *url.URL) string {
 		return c.fallback.Encode(u) // too long to be a DNS label
 	}
 	host := label + "." + c.Base
+	if host == c.Portal {
+		// A target that would land on the portal's own name has to go
+		// somewhere else, or it would take the console with it.
+		return c.fallback.Encode(u)
+	}
 	if c.Port != "" {
 		host = net.JoinHostPort(host, c.Port)
 	}
@@ -417,12 +439,12 @@ func (c *HostCodec) Encode(u *url.URL) string {
 // sub-domains it serves targets on.
 func (c *HostCodec) isGatewayHost(host string) bool {
 	h := hostOnly(host)
-	return h == c.Base || strings.HasSuffix(h, "."+c.Base)
+	return h == c.Base || h == c.Portal || strings.HasSuffix(h, "."+c.Base)
 }
 
 func (c *HostCodec) Decode(host, escapedPath, rawQuery string) (*url.URL, error) {
 	h := hostOnly(host)
-	if !strings.HasSuffix(h, "."+c.Base) {
+	if h == c.Portal || !strings.HasSuffix(h, "."+c.Base) {
 		return nil, ErrNotProxyPath
 	}
 	label := strings.TrimSuffix(h, "."+c.Base)

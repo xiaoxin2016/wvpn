@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -43,6 +44,7 @@ type config struct {
 	urlMode    string
 	urlKey     string
 	baseDomain string
+	portalHost string
 	publicPort string
 
 	allowHosts   string
@@ -84,10 +86,11 @@ func main() {
 	flag.StringVar(&c.portal, "name", "WebVPN", "name shown on the portal page (never on the sign-in page)")
 	flag.StringVar(&c.resource, "bookmarks", "", "JSON file of portal links, imported once on first run; afterwards the admin console owns them")
 
-	flag.StringVar(&c.urlMode, "url-mode", "plain", "target encoding: plain | wrd | subdomain")
+	flag.StringVar(&c.urlMode, "url-mode", "", "initial target encoding: plain | wrd | subdomain; the console owns it afterwards")
 	flag.StringVar(&c.urlKey, "url-key", webvpn.DefaultWRDKey, "AES key for -url-mode wrd (16, 24 or 32 bytes)")
-	flag.StringVar(&c.baseDomain, "base-domain", "", "wildcard domain for -url-mode subdomain, e.g. webvpn.example.com")
-	flag.StringVar(&c.publicPort, "public-port", "", "port browsers reach the gateway on, for -url-mode subdomain")
+	flag.StringVar(&c.baseDomain, "base-domain", "", "initial wildcard domain targets are addressed under, e.g. intra.corp.com")
+	flag.StringVar(&c.portalHost, "portal-host", "", "initial name for the portal itself; defaults to app.<base-domain>")
+	flag.StringVar(&c.publicPort, "public-port", "", "initial port browsers reach the gateway on, when not the scheme default")
 
 	flag.StringVar(&c.allowHosts, "allow", "", "hard allowlist of target hosts (suffix match), applied on top of the console's site policy; empty means any")
 	flag.StringVar(&c.denyHosts, "deny", "", "hard denylist of target hosts (suffix match), applied on top of the console's site policy")
@@ -142,7 +145,6 @@ func main() {
 }
 
 func run(c config, logger *log.Logger) error {
-	serveTLS := c.tlsCert != "" && c.tlsKey != ""
 
 	switch c.smtpTLSMode {
 	case store.TLSAuto, store.TLSRequire, store.TLSNone, store.TLSImplicit:
@@ -172,6 +174,16 @@ func run(c config, logger *log.Logger) error {
 	if err := seedGateway(cfg, c, logger); err != nil {
 		return err
 	}
+
+	// TLS material comes from the console unless files were named on the
+	// command line. Whether the port speaks TLS is settled here, at startup: a
+	// plain listener cannot start negotiating TLS later. The certificate behind
+	// it is read per handshake, so a renewal needs no restart.
+	certs, err := newCertSource(cfg, c.tlsCert, c.tlsKey, logger)
+	if err != nil {
+		return err
+	}
+	serveTLS := certs.active()
 
 	// The addressing scheme is read per request, so switching URL mode in the
 	// console takes effect without a restart.
@@ -254,14 +266,15 @@ func run(c config, logger *log.Logger) error {
 		logger.Print(setupBanner(scheme, ln.Addr().String(), setupToken))
 	}
 
+	if serveTLS {
+		ln = tls.NewListener(ln, &tls.Config{
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: certs.get,
+		})
+	}
+
 	errc := make(chan error, 1)
-	go func() {
-		if serveTLS {
-			errc <- srv.ServeTLS(ln, c.tlsCert, c.tlsKey)
-			return
-		}
-		errc <- srv.Serve(ln)
-	}()
+	go func() { errc <- srv.Serve(ln) }()
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
@@ -327,7 +340,7 @@ func (c *codecCache) build(g store.Gateway) (webvpn.Codec, error) {
 	case store.URLWRD:
 		codec, err = webvpn.NewWRDCodec(c.wrdKey)
 	case store.URLSubdomain:
-		codec, err = webvpn.NewHostCodec(g.BaseDomain, g.PublicPort, c.tls)
+		codec, err = webvpn.NewHostCodec(g.BaseDomain, g.PortalHost(), g.PublicPort, c.tls)
 	default:
 		codec = webvpn.PlainCodec{}
 	}
@@ -347,7 +360,8 @@ func siteInfo(cfg *store.Store, serveTLS bool) auth.SiteInfo {
 	if g.Mode() != store.URLSubdomain || g.BaseDomain == "" {
 		return auth.SiteInfo{}
 	}
-	host := g.BaseDomain
+	portal := g.PortalHost()
+	host := portal
 	if g.PublicPort != "" {
 		host = net.JoinHostPort(host, g.PublicPort)
 	}
@@ -356,7 +370,9 @@ func siteInfo(cfg *store.Store, serveTLS bool) auth.SiteInfo {
 		scheme = "https"
 	}
 	return auth.SiteInfo{
-		GatewayHost:  g.BaseDomain,
+		GatewayHost: portal,
+		// One sign-in covers the portal and every target sub-domain, which all
+		// live under the wildcard domain.
 		CookieDomain: "." + g.BaseDomain,
 		LoginOrigin:  scheme + "://" + host,
 		NextDomain:   g.BaseDomain,
@@ -366,7 +382,7 @@ func siteInfo(cfg *store.Store, serveTLS bool) auth.SiteInfo {
 // seedGateway writes the URL settings given on the command line the first time
 // the gateway runs. After that the console owns them.
 func seedGateway(cfg *store.Store, c config, logger *log.Logger) error {
-	if c.urlMode == "" && c.baseDomain == "" && c.publicPort == "" {
+	if c.urlMode == "" && c.baseDomain == "" && c.portalHost == "" && c.publicPort == "" {
 		return nil
 	}
 	current := cfg.Get()
@@ -378,6 +394,7 @@ func seedGateway(cfg *store.Store, c config, logger *log.Logger) error {
 	current.Gateway = store.Gateway{
 		URLMode:    c.urlMode,
 		BaseDomain: c.baseDomain,
+		Host:       c.portalHost,
 		PublicPort: c.publicPort,
 	}
 	if err := cfg.Set(current); err != nil {
@@ -607,4 +624,71 @@ func setupBanner(scheme, addr, token string) string {
 		"  该令牌仅在本次进程内有效，管理员首次登录成功后即失效。\n" +
 		"  若网关对外使用其他域名，请把上面的主机名换成对应地址。\n" +
 		line
+}
+
+// certSource supplies the gateway's own certificate. Files named on the command
+// line win; otherwise it comes from the console, and is re-read on every
+// handshake so a renewal takes effect without a restart.
+type certSource struct {
+	store    *store.Store
+	fileCert *tls.Certificate
+	logger   *log.Logger
+
+	mu     sync.Mutex
+	cached *tls.Certificate
+	from   store.TLS
+}
+
+func newCertSource(cfg *store.Store, certFile, keyFile string, logger *log.Logger) (*certSource, error) {
+	c := &certSource{store: cfg, logger: logger}
+	switch {
+	case certFile != "" && keyFile != "":
+		pair, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading %s: %w", certFile, err)
+		}
+		c.fileCert = &pair
+		if cfg.Get().TLS.Configured() {
+			logger.Print("a certificate is configured in the console, but -tls-cert/-tls-key take precedence")
+		}
+	case certFile != "" || keyFile != "":
+		return nil, errors.New("-tls-cert and -tls-key must be given together")
+	}
+	if c.fileCert == nil && cfg.Get().TLS.Configured() {
+		// Fail fast on a certificate the console cannot have validated, e.g.
+		// one hand-edited into the file.
+		if _, err := cfg.Get().TLS.Certificate(); err != nil {
+			return nil, fmt.Errorf("the stored certificate is unusable: %w", err)
+		}
+	}
+	return c, nil
+}
+
+// active reports whether the listener should speak TLS at all. This is decided
+// once, at startup: a plain listener cannot start negotiating TLS later.
+func (c *certSource) active() bool {
+	return c.fileCert != nil || c.store.Get().TLS.Configured()
+}
+
+func (c *certSource) get(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+	if c.fileCert != nil {
+		return c.fileCert, nil
+	}
+	current := c.store.Get().TLS
+	if !current.Configured() {
+		return nil, errors.New("no certificate is configured")
+	}
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cached != nil && c.from == current {
+		return c.cached, nil
+	}
+	pair, err := current.Certificate()
+	if err != nil {
+		return nil, err
+	}
+	c.cached, c.from = &pair, current
+	c.logger.Print("loaded the certificate configured in the console")
+	return c.cached, nil
 }
