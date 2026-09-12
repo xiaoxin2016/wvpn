@@ -696,3 +696,54 @@ func TestClientIPBehindAProxy(t *testing.T) {
 		t.Errorf("clientIP without headers = %q", got)
 	}
 }
+
+func TestIdentityRoutesBelongToTheGatewayHost(t *testing.T) {
+	mailer := captureMailer{ch: make(chan [3]string, 1)}
+	m, err := New(Options{
+		Store:  newStore(t, store.Config{DefaultDomain: "test.com", AllowedUsers: []string{"*@test.com"}}),
+		Mailer: mailer,
+		Logger: log.New(os.Stderr, "test ", 0),
+		Site: func() SiteInfo {
+			return SiteInfo{GatewayHost: "app.intra.corp.com", CookieDomain: ".app.intra.corp.com"}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+
+	// Under the subdomain mode a proxied site keeps its own /login: the path
+	// only belongs to the gateway on the gateway's own host.
+	m.SetFallback(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Served-By", "proxy")
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	mux := http.NewServeMux()
+	m.Routes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	req := httptest.NewRequest(http.MethodGet, "http://oa-corp-local.app.intra.corp.com/login", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Header().Get("X-Served-By") != "proxy" {
+		t.Errorf("/login on a proxied host was answered by the gateway: %d", rec.Code)
+	}
+
+	own := httptest.NewRequest(http.MethodGet, "http://app.intra.corp.com/login", nil)
+	rec = httptest.NewRecorder()
+	mux.ServeHTTP(rec, own)
+	if rec.Header().Get("X-Served-By") == "proxy" {
+		t.Error("/login on the gateway's own host was proxied away")
+	}
+	if rec.Code != http.StatusOK {
+		t.Errorf("sign-in page: %d", rec.Code)
+	}
+
+	// The session cookie follows the configured domain, which is what lets one
+	// sign-in cover every proxied sub-domain.
+	if got := m.cookie("x", time.Hour).Domain; got != ".app.intra.corp.com" {
+		t.Errorf("cookie domain = %q", got)
+	}
+}

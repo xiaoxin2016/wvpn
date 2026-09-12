@@ -319,22 +319,35 @@ func (c *HostCodec) Match(host, escapedPath string) bool {
 	return strings.HasSuffix(h, "."+c.Base) && len(h) > len(c.Base)+1
 }
 
-// encodeLabel escapes a hostname into a single DNS label.
-func encodeLabel(hostname string, tls bool) string {
+// encodeLabel escapes a host into a single DNS label: dots become "-", a
+// literal "-" is doubled, a non-default port is appended as "-p<port>", and an
+// "-s" suffix marks a TLS origin.
+func encodeLabel(hostname, port string, tls bool) string {
 	label := strings.ReplaceAll(hostname, "-", "--")
 	label = strings.ReplaceAll(label, ".", "-")
+	if port != "" {
+		label += "-p" + port
+	}
 	if tls {
 		label += "-s"
 	}
 	return label
 }
 
-// decodeLabel is the inverse of encodeLabel. The "-s" marker is inherently
-// ambiguous with a hostname whose last component is literally "s"; the appliance
-// this mirrors has the same wart.
-func decodeLabel(label string) (hostname string, tls bool) {
+// labelPortRe matches the port suffix, taking care not to read the second half
+// of a doubled "-" as the start of one.
+var labelPortRe = regexp.MustCompile(`(^|[^-])-p([0-9]{1,5})$`)
+
+// decodeLabel is the inverse of encodeLabel. The "-s" and "-p" markers are
+// inherently ambiguous with a host whose last component is literally "s" or
+// "p1234"; the appliance this mirrors has the same wart.
+func decodeLabel(label string) (hostname, port string, tls bool) {
 	if strings.HasSuffix(label, "-s") && !strings.HasSuffix(label, "--s") {
 		label, tls = strings.TrimSuffix(label, "-s"), true
+	}
+	if m := labelPortRe.FindStringSubmatch(label); m != nil {
+		port = m[2]
+		label = label[:len(label)-len("-p")-len(port)]
 	}
 	var b strings.Builder
 	for i := 0; i < len(label); i++ {
@@ -348,8 +361,12 @@ func decodeLabel(label string) (hostname string, tls bool) {
 			b.WriteByte('.')
 		}
 	}
-	return b.String(), tls
+	return b.String(), port, tls
 }
+
+// maxLabel is the DNS limit on a single label; a target that does not fit falls
+// back to the plain path form, which has no such limit.
+const maxLabel = 63
 
 func (c *HostCodec) gatewayScheme(target string) string {
 	switch {
@@ -368,13 +385,23 @@ func (c *HostCodec) Encode(u *url.URL) string {
 	if u == nil || u.Host == "" || !SchemeSupported(u.Scheme) {
 		return ""
 	}
-	if port := u.Port(); port != "" && !defaultPort(u.Scheme, port) {
-		return c.fallback.Encode(u) // no room for a port in the label
+	if c.isGatewayHost(u.Hostname()) {
+		// Already one of ours: wrapping it again would point the gateway at
+		// itself.
+		return ""
 	}
 	if strings.Contains(u.Hostname(), ":") {
 		return c.fallback.Encode(u) // IPv6 literal
 	}
-	host := encodeLabel(u.Hostname(), isTLSScheme(u.Scheme)) + "." + c.Base
+	port := u.Port()
+	if defaultPort(u.Scheme, port) {
+		port = ""
+	}
+	label := encodeLabel(u.Hostname(), port, isTLSScheme(u.Scheme))
+	if len(label) > maxLabel {
+		return c.fallback.Encode(u) // too long to be a DNS label
+	}
+	host := label + "." + c.Base
 	if c.Port != "" {
 		host = net.JoinHostPort(host, c.Port)
 	}
@@ -386,6 +413,13 @@ func (c *HostCodec) Encode(u *url.URL) string {
 	return b.String()
 }
 
+// isGatewayHost reports whether a host is the gateway itself or one of the
+// sub-domains it serves targets on.
+func (c *HostCodec) isGatewayHost(host string) bool {
+	h := hostOnly(host)
+	return h == c.Base || strings.HasSuffix(h, "."+c.Base)
+}
+
 func (c *HostCodec) Decode(host, escapedPath, rawQuery string) (*url.URL, error) {
 	h := hostOnly(host)
 	if !strings.HasSuffix(h, "."+c.Base) {
@@ -395,10 +429,16 @@ func (c *HostCodec) Decode(host, escapedPath, rawQuery string) (*url.URL, error)
 	if label == "" || strings.Contains(label, ".") {
 		return nil, ErrBadTarget
 	}
-	hostname, tls := decodeLabel(label)
+	hostname, port, tls := decodeLabel(label)
 	scheme := "http"
 	if tls {
 		scheme = "https"
+	}
+	if port != "" {
+		if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+			return nil, ErrBadTarget
+		}
+		hostname = net.JoinHostPort(hostname, port)
 	}
 	return assemble(scheme, hostname, strings.TrimPrefix(escapedPath, "/"), rawQuery)
 }

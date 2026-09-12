@@ -75,7 +75,7 @@ type portalData struct {
 }
 
 func (h *Handler) servePortal(w http.ResponseWriter, r *http.Request) {
-	data := portalData{Name: h.opts.Portal.Name, URLMode: h.codec.Name()}
+	data := portalData{Name: h.opts.Portal.Name, URLMode: h.codec().Name()}
 	if data.Name == "" {
 		data.Name = "WebVPN"
 	}
@@ -93,7 +93,7 @@ func (h *Handler) servePortal(w http.ResponseWriter, r *http.Request) {
 				Name:   it.Name,
 				URL:    u.Host + u.Path,
 				Target: u.String(),
-				Href:   h.codec.Encode(u),
+				Href:   h.codec().Encode(u),
 				Note:   it.Note,
 				Icon:   firstRune(it.Name),
 			})

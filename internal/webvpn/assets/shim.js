@@ -18,9 +18,49 @@
   var OPAQUE = /^(data|blob|javascript|mailto|tel|sms|about|magnet|ftp|file|chrome|chrome-extension|intent):/i;
   var PROXYABLE = { "http:": 1, "https:": 1, "ws:": 1, "wss:": 1 };
 
+  // Under the sub-domain mode the gateway answers on a whole wildcard domain,
+  // and every one of those hosts is already a gateway address.
+  var BASE = cfg.b || "";
+  var BASE_PORT = cfg.port || "";
+  var BASE_TLS = cfg.s === "1";
+
+  function isGatewayHost(host) {
+    var name = host.split(":")[0].toLowerCase();
+    return name === location.hostname.toLowerCase() ||
+      (BASE !== "" && (name === BASE || name.slice(-(BASE.length + 1)) === "." + BASE));
+  }
+
+  // Mirror of the server-side label encoding, so an address built at runtime
+  // looks exactly like one the gateway rewrote.
+  function label(hostname, port, tls) {
+    var out = hostname.replace(/-/g, "--").replace(/\./g, "-");
+    if (port) out += "-p" + port;
+    if (tls) out += "-s";
+    return out;
+  }
+
+  function pathForm(u) {
+    return PREFIX + u.protocol.slice(0, -1) + "/" + u.host + u.pathname + u.search + u.hash;
+  }
+
   function encode(u) {
     if (!PROXYABLE[u.protocol]) return null;
-    return PREFIX + u.protocol.slice(0, -1) + "/" + u.host + u.pathname + u.search + u.hash;
+    if (BASE === "") return pathForm(u);
+
+    var scheme = u.protocol.slice(0, -1);
+    var tls = scheme === "https" || scheme === "wss";
+    var port = u.port;
+    if ((port === "80" && !tls) || (port === "443" && tls)) port = "";
+    var name = u.hostname;
+    if (name.indexOf(":") >= 0) return pathForm(u); // IPv6 literal
+    var lab = label(name, port, tls);
+    if (lab.length > 63) return pathForm(u);        // too long for a DNS label
+
+    var gatewayScheme = (scheme === "ws" || scheme === "wss")
+      ? (BASE_TLS ? "wss" : "ws")
+      : (BASE_TLS ? "https" : "http");
+    var host = lab + "." + BASE + (BASE_PORT ? ":" + BASE_PORT : "");
+    return gatewayScheme + "://" + host + u.pathname + u.search + u.hash;
   }
 
   // rewrite maps one reference onto the gateway, returning the input unchanged
@@ -36,7 +76,7 @@
     } catch (e) {
       return ref;
     }
-    if (u.origin === location.origin) return ref; // already ours
+    if (u.origin === location.origin || isGatewayHost(u.host)) return ref; // already ours
     var enc = encode(u);
     return enc === null ? ref : enc;
   }
@@ -44,6 +84,8 @@
   // wsRewrite keeps websocket URLs on the gateway's own scheme.
   function wsRewrite(ref) {
     var out = rewrite(ref);
+    // The path form is relative to this origin; a websocket needs an absolute
+    // ws(s) URL. The sub-domain form is already absolute.
     if (typeof out !== "string" || out.indexOf(PREFIX) !== 0) return out;
     var scheme = location.protocol === "https:" ? "wss:" : "ws:";
     return scheme + "//" + location.host + out;
@@ -297,8 +339,8 @@
         if (!url) return;
         var mapped = rewrite(url);
         if (typeof mapped !== "string" || mapped === url) return;
-        // Same-origin already: nothing to correct.
-        if (new URL(url, location.href).origin === location.origin) return;
+        // Already a gateway address: nothing to correct.
+        if (isGatewayHost(new URL(url, location.href).host)) return;
 
         e.preventDefault();
         var go = function () {

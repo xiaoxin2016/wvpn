@@ -210,7 +210,7 @@ func (h *Handler) serveUntrusted(w http.ResponseWriter, r *http.Request, ce *cer
 	target, next := ce.Host, "/"
 	if info := infoFrom(r.Context()); info != nil {
 		target = info.target.String()
-		if enc := h.codec.Encode(info.target); enc != "" {
+		if enc := h.codec().Encode(info.target); enc != "" {
 			next = enc
 		}
 	}

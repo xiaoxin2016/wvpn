@@ -40,6 +40,40 @@ type Config struct {
 	// SMTP is where verification codes are sent from. It overrides the
 	// command-line SMTP flags once an address is set.
 	SMTP SMTP `json:"smtp"`
+	// Gateway is how target addresses are expressed in the browser.
+	Gateway Gateway `json:"gateway"`
+}
+
+// URL modes. See the Codec implementations in the webvpn package.
+const (
+	// URLPlain keeps the target visible in the path.
+	URLPlain = "plain"
+	// URLWRD hides the host in an encrypted path segment.
+	URLWRD = "wrd"
+	// URLSubdomain gives every target its own sub-domain of BaseDomain, which
+	// is the only mode where each site gets its own browser origin.
+	URLSubdomain = "subdomain"
+)
+
+// Gateway is the admin-editable half of how the gateway addresses targets.
+type Gateway struct {
+	// URLMode is one of URLPlain, URLWRD or URLSubdomain.
+	URLMode string `json:"url_mode"`
+	// BaseDomain is the wildcard domain used by URLSubdomain, e.g.
+	// "app.intra.corp.com" with *.app.intra.corp.com pointed at the gateway.
+	BaseDomain string `json:"base_domain"`
+	// PublicPort is the port browsers reach the gateway on, when it is not the
+	// default for the scheme.
+	PublicPort string `json:"public_port"`
+}
+
+// Mode returns the configured URL mode, defaulting to plain.
+func (g Gateway) Mode() string {
+	switch g.URLMode {
+	case URLPlain, URLWRD, URLSubdomain:
+		return g.URLMode
+	}
+	return URLPlain
 }
 
 // TLS modes for a mail submission service.
@@ -204,6 +238,12 @@ func normalizeConfig(c Config) Config {
 	}
 	c.Bookmarks = groups
 
+	// Not coerced to a default here: an unrecognised mode is a typo worth
+	// rejecting, and Mode() supplies the default when the field is empty.
+	c.Gateway.URLMode = strings.ToLower(strings.TrimSpace(c.Gateway.URLMode))
+	c.Gateway.BaseDomain = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.BaseDomain), "."))
+	c.Gateway.PublicPort = strings.TrimSpace(c.Gateway.PublicPort)
+
 	c.SMTP.Addr = strings.TrimSpace(c.SMTP.Addr)
 	c.SMTP.From = strings.TrimSpace(c.SMTP.From)
 	c.SMTP.Username = strings.TrimSpace(c.SMTP.Username)
@@ -246,6 +286,12 @@ func (c Config) clone() Config {
 		groups[i].Items = append([]Bookmark(nil), groups[i].Items...)
 	}
 	c.Bookmarks = groups
+
+	// Not coerced to a default here: an unrecognised mode is a typo worth
+	// rejecting, and Mode() supplies the default when the field is empty.
+	c.Gateway.URLMode = strings.ToLower(strings.TrimSpace(c.Gateway.URLMode))
+	c.Gateway.BaseDomain = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.BaseDomain), "."))
+	c.Gateway.PublicPort = strings.TrimSpace(c.Gateway.PublicPort)
 
 	c.SMTP.Addr = strings.TrimSpace(c.SMTP.Addr)
 	c.SMTP.From = strings.TrimSpace(c.SMTP.From)
@@ -296,7 +342,36 @@ func Validate(c Config) error {
 			}
 		}
 	}
+	if err := validateGateway(c.Gateway); err != nil {
+		return err
+	}
 	return validateSMTP(c.SMTP)
+}
+
+func validateGateway(g Gateway) error {
+	switch g.URLMode {
+	case "", URLPlain, URLWRD, URLSubdomain:
+	default:
+		return fmt.Errorf("未知的 URL 模式 %q", g.URLMode)
+	}
+	if g.BaseDomain != "" {
+		if !domainRe.MatchString(g.BaseDomain) {
+			return fmt.Errorf("网关域名 %q 不是合法的域名", g.BaseDomain)
+		}
+		if !strings.Contains(g.BaseDomain, ".") {
+			return fmt.Errorf("网关域名需要是完整域名，例如 app.intra.corp.com")
+		}
+	}
+	if g.Mode() == URLSubdomain && g.BaseDomain == "" {
+		return fmt.Errorf("子域名模式需要填写网关域名（并把 *.该域名 解析到网关）")
+	}
+	if g.PublicPort != "" {
+		n, err := strconv.Atoi(g.PublicPort)
+		if err != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("对外端口 %q 不合法", g.PublicPort)
+		}
+	}
+	return nil
 }
 
 func validateSMTP(s SMTP) error {
