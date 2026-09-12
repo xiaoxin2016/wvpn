@@ -337,3 +337,67 @@ func TestStrayRecoveryWithoutAReferer(t *testing.T) {
 		t.Errorf("with a Referer, Location = %q, want %q", got, want)
 	}
 }
+
+func TestUnwrapsAGatewayPathFoldedIntoATarget(t *testing.T) {
+	h := New(Options{Guard: &Guard{AllowPrivate: true}})
+
+	cases := []struct {
+		name, in, want string
+	}{{
+		// What a page produces from "my base path" + location.pathname.
+		name: "the gateway folded into the middle",
+		in:   "http://soc.corp.test/ZULXYAIK8642/p/http/soc.corp.test/",
+		want: "http://soc.corp.test/ZULXYAIK8642/",
+	}, {
+		name: "with a path of its own after it",
+		in:   "http://soc.corp.test/base/p/http/soc.corp.test/app/js/x.js",
+		want: "http://soc.corp.test/base/app/js/x.js",
+	}, {
+		name: "folded in twice",
+		in:   "http://soc.corp.test/a/p/http/soc.corp.test/b/p/http/soc.corp.test/c",
+		want: "http://soc.corp.test/a/b/c",
+	}, {
+		name: "a reference to another host is left alone",
+		in:   "http://soc.corp.test/base/p/http/elsewhere.test/x",
+		want: "http://soc.corp.test/base/p/http/elsewhere.test/x",
+	}, {
+		name: "an ordinary path is left alone",
+		in:   "http://soc.corp.test/base/app/js/x.js",
+		want: "http://soc.corp.test/base/app/js/x.js",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in, err := url.Parse(tc.in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := h.unwrapTarget(in).String(); got != tc.want {
+				t.Errorf("unwrapTarget(%s) = %s, want %s", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestFoldedGatewayPathRedirectsTheBrowser(t *testing.T) {
+	origin := originServer(t)
+	gw, client := gatewayFor(t, Options{})
+	host := originHost(t, origin)
+
+	// The browser has to be moved to the address the page meant, or what it
+	// reads back about where it is stays wrong and every relative reference
+	// on the page is measured from the wrong place.
+	resp, _ := get(t, client, gw.URL+"/p/http/"+host+"/base/p/http/"+host+"/page2", document)
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("status = %d, want a redirect", resp.StatusCode)
+	}
+	if got, want := resp.Header.Get("Location"), "/p/http/"+host+"/base/page2"; got != want {
+		t.Errorf("Location = %q, want %q", got, want)
+	}
+
+	// A request that needs no repair is proxied, not redirected.
+	resp, _ = get(t, client, gw.URL+"/p/http/"+host+"/", document)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("an ordinary request was disturbed: %d", resp.StatusCode)
+	}
+}

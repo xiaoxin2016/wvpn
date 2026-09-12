@@ -358,6 +358,49 @@ func (h *Handler) serveCookie(w http.ResponseWriter, r *http.Request) {
 	storeShared(h.jars.get(key), target, []*http.Cookie{sc.toHTTPCookie()})
 }
 
+// unwrapTarget repairs a target whose path carries a gateway reference of its
+// own.
+//
+// A page that builds addresses out of where it currently is — "my base path,
+// plus the path I am on" — reads location.pathname, and under the path codecs
+// that carries the gateway's prefix. What comes back is /base/p/https/site/rest:
+// the site asked for a path with the gateway folded into the middle of it, and
+// every relative address on the page that follows is measured from there.
+//
+// Nothing can stop a page reading its own address — location is unforgeable —
+// but the embedded reference names the path the page meant all along, so splice
+// it back out: /base + /rest. Only a reference to the target's own host counts,
+// which is what keeps a site that really does serve such a path from being
+// rewritten out from under itself.
+func (h *Handler) unwrapTarget(t *url.URL) *url.URL {
+	out := t
+	for hop := 0; hop < 4; hop++ {
+		path := out.EscapedPath()
+		var next *url.URL
+		for i := 1; i < len(path) && next == nil; i++ {
+			if path[i] != '/' {
+				continue
+			}
+			inner, err := h.decode(out.Host, path[i:], out.RawQuery)
+			if err != nil || !strings.EqualFold(inner.Host, out.Host) {
+				continue
+			}
+			joined, err := url.Parse(path[:i] + inner.EscapedPath())
+			if err != nil {
+				continue
+			}
+			spliced := *out
+			spliced.Path, spliced.RawPath = joined.Path, joined.RawPath
+			next = &spliced
+		}
+		if next == nil {
+			break
+		}
+		out = next
+	}
+	return out
+}
+
 // decode resolves an inbound request with whichever codec claims it.
 func (h *Handler) decode(host, path, query string) (*url.URL, error) {
 	if h.plain.Match(host, path) {
@@ -372,6 +415,21 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 		http.Error(w, "无法解析目标地址", http.StatusBadRequest)
 		return
 	}
+	// A page that folded the gateway into an address of its own is sent to the
+	// address it meant, so that what it reads back about where it is — and
+	// every relative reference measured from there — is the site's own.
+	if fixed := h.unwrapTarget(target); fixed.String() != target.String() {
+		if enc := h.codec().Encode(fixed); enc != "" {
+			h.log.Printf("unwrapped %s -> %s", target, fixed)
+			code := http.StatusFound
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				code = http.StatusTemporaryRedirect
+			}
+			http.Redirect(w, r, enc, code)
+			return
+		}
+	}
+
 	check, err := h.opts.Guard.CheckTarget(target.Host, h.siteExempt(r))
 	if err != nil {
 		http.Error(w, "目标被网关策略拒绝: "+err.Error(), http.StatusForbidden)

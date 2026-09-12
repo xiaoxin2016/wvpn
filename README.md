@@ -374,6 +374,25 @@ uopsAuthMap: { accessToken: "474ca9…", domain: "corp.example", cookieTime: 432
   或该浏览器当前所在文档判定归属，307 重定向回正确的网关地址，并在日志里记一行
   `stray GET /api/profile -> http://soc.corp.com/api/profile`，便于排查还有哪些地址逃逸。
 
+### 应用自己的基路径，与 location.pathname
+
+有些站点自带一层基路径（`https://soc.corp.com/ZULXYAIK8642/`），并在启动时把自己导航到
+"基路径 + 当前路径"。路径模式下 `location.pathname` 带着网关前缀，于是拼出来的是
+`/ZULXYAIK8642/p/https/soc.corp.com/`——站点被要求打开一条把网关折进中段的路径，此后页面上
+每一个相对地址都从这个错位的位置起算，资源全部落到 SPA 兜底的 HTML 上，浏览器便报
+`Refused to execute script … MIME type ('text/html') is not executable`。
+
+`location` 不可劫持，脚本层面拦不住这次读取。但**网关前缀出现在目标路径的中段一定是错的**，
+而那段引用正好说明了页面本来想去哪里，于是网关把它拼回去（`/base` + `/rest`）并把浏览器
+重定向过去——`location.pathname` 随之恢复正常，相对地址也就都对了。只有指向目标自身主机的
+引用才会被拼合，免得误伤真的提供这种路径的站点。日志里记作
+`unwrapped http://soc.corp.com/base/p/https/soc.corp.com/ -> http://soc.corp.com/base/`。
+
+**有一类应用路径模式救不回来**：如果它要求 `location.pathname` **以**自己的基路径**开头**
+（而不只是包含），路径模式下这个条件永远无法满足——它会不停地重新导航。这类站点请用
+[子域名模式](#网关地址与子域名模式)，那里 `location.pathname` 就是站点自己的路径，条件自然成立。
+实测同一个应用：路径模式下反复跳转直至超时，子域名模式下一次加载成功。
+
 ### 赋值式跳转
 
 `location.href = "https://sso.intra.com/"` 是拦不住的：该属性是 unforgeable 的，任何补丁都看不到这次赋值。
