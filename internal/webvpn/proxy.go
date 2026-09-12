@@ -46,6 +46,11 @@ type Options struct {
 	// JSScope bounds the rewriting of absolute URLs inside scripts and JSON.
 	JSScope JSScope
 
+	// RestoreFor reports whether outbound parameters aimed at a target should
+	// have gateway addresses put back to the addresses they stand for, which
+	// is what makes single sign-on work. Nil restores for every target.
+	RestoreFor func(target *url.URL) bool
+
 	// SessionCookie names the gateway's own session cookie, which must never
 	// be forwarded to a proxied origin.
 	SessionCookie string
@@ -177,6 +182,14 @@ func (h *Handler) codec() Codec {
 		return h.opts.Codec
 	}
 	return h.plain
+}
+
+// restores reports whether outbound parameters aimed at target are restored.
+func (h *Handler) restores(target *url.URL) bool {
+	if h.opts.RestoreFor == nil {
+		return true
+	}
+	return h.opts.RestoreFor(target)
 }
 
 // rewriter builds a rewriter for the codec currently in force.
@@ -317,6 +330,15 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 	// The rewriter can only undo gzip, so do not let the browser negotiate br
 	// or zstd on our behalf.
 	pr.Out.Header.Set("Accept-Encoding", "gzip")
+
+	// An address the browser carries in a parameter — a redirect_uri, a
+	// service, a RelayState — is the gateway's, and the origin expects the
+	// real one. This undoes the gateway's own rewriting for the trip out.
+	if h.restores(target) {
+		page := h.browserPage(info, pr.In)
+		pr.Out.URL.RawQuery = h.restoreQuery(pr.Out.URL.RawQuery, page, pr.In.Host)
+		h.restoreBody(pr.Out, page, pr.In.Host)
+	}
 
 	// Cookies are edited as text: parsing them into http.Cookie and writing
 	// them back mangles or drops values the origin is entitled to send.

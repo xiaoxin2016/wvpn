@@ -367,3 +367,45 @@ func testKeyPair(t *testing.T) (certPEM, keyPEM string) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
 		string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 }
+
+func TestRestorePolicy(t *testing.T) {
+	// The default is to restore everywhere: a parameter naming the gateway is
+	// never what an origin expects.
+	s := newStore(t, Config{})
+	if s.Get().SSO.Mode != RestoreAll {
+		t.Fatalf("default mode = %q, want %q", s.Get().SSO.Mode, RestoreAll)
+	}
+	for _, h := range []string{"sso.corp.com", "anything.test", "10.0.0.1:8443"} {
+		if !s.RestoresAddresses(h) {
+			t.Errorf("RestoresAddresses(%s) = false, want true", h)
+		}
+	}
+
+	// Confined to the identity provider, sub-domains included.
+	s = newStore(t, Config{SSO: SSO{Mode: RestoreHosts, Hosts: []string{"sso.corp.com"}}})
+	for _, h := range []string{"sso.corp.com", "idp.sso.corp.com", "sso.corp.com:8443"} {
+		if !s.RestoresAddresses(h) {
+			t.Errorf("RestoresAddresses(%s) = false, want true", h)
+		}
+	}
+	if s.RestoresAddresses("oa.corp.com") {
+		t.Error("RestoresAddresses(oa.corp.com) = true, want false")
+	}
+
+	s = newStore(t, Config{SSO: SSO{Mode: RestoreOff, Hosts: []string{"sso.corp.com"}}})
+	if s.RestoresAddresses("sso.corp.com") {
+		t.Error("restoration is off, yet it reported true")
+	}
+}
+
+func TestRestoreValidation(t *testing.T) {
+	if err := Validate(Config{SSO: SSO{Mode: RestoreHosts}}); err == nil {
+		t.Error("an empty host list in by-host mode should be rejected")
+	}
+	if err := Validate(Config{SSO: SSO{Mode: RestoreHosts, Hosts: []string{"bad host!"}}}); err == nil {
+		t.Error("a malformed host pattern should be rejected")
+	}
+	if err := Validate(normalizeConfig(Config{SSO: SSO{Mode: "nonsense"}})); err != nil {
+		t.Errorf("an unknown mode should normalize to the default: %v", err)
+	}
+}

@@ -47,6 +47,8 @@ type Config struct {
 	Gateway Gateway `json:"gateway"`
 	// TLS is the certificate the gateway serves to browsers.
 	TLS TLS `json:"tls"`
+	// SSO governs putting real addresses back into outbound requests.
+	SSO SSO `json:"sso"`
 }
 
 // TLS is the gateway's own certificate and private key, both PEM encoded. A
@@ -236,6 +238,35 @@ type Access struct {
 	Sites []string `json:"sites"`
 }
 
+// Restore modes.
+const (
+	// RestoreAll puts gateway addresses back into the parameters of every
+	// proxied request. It is the default: a parameter naming the gateway is
+	// never what an origin expects.
+	RestoreAll = "all"
+	// RestoreHosts restricts that to the targets Hosts matches, which is how
+	// an operator confines it to the identity provider.
+	RestoreHosts = "hosts"
+	// RestoreOff leaves outbound parameters alone.
+	RestoreOff = "off"
+)
+
+// SSO controls address restoration on the way out.
+//
+// Single sign-on hands the identity provider a redirect_uri saying where to
+// return to, and an application derives that from where the browser is. Through
+// the gateway that is the gateway's own address, which the provider compares
+// against the callback registered for the real application and refuses. The
+// gateway therefore reverses its own rewriting in outbound parameters, so the
+// provider sees the address it has on file.
+type SSO struct {
+	// Mode is RestoreAll, RestoreHosts or RestoreOff.
+	Mode string `json:"mode"`
+	// Hosts are host patterns ("sso.corp.com", "*.corp.com") naming the
+	// targets restoration applies to when Mode is RestoreHosts.
+	Hosts []string `json:"hosts"`
+}
+
 // Bookmark is one link on the portal.
 type Bookmark struct {
 	Name string `json:"name"`
@@ -257,13 +288,18 @@ type Store struct {
 	mu    sync.RWMutex
 	cfg   Config
 	rules siteRules
+	// sso is the parsed form of SSO.Hosts, read on every proxied request.
+	sso siteRules
 }
 
 // LoadStore reads path, falling back to def when the file does not exist yet.
 // The defaults are written out so an operator has a file to edit.
 func LoadStore(path string, def Config) (*Store, error) {
 	s := &Store{path: path, cfg: normalizeConfig(def)}
-	defer func() { s.rules, _ = parseSites(s.cfg.Access.Sites) }()
+	defer func() {
+		s.rules, _ = parseSites(s.cfg.Access.Sites)
+		s.sso, _ = parseSites(s.cfg.SSO.Hosts)
+	}()
 	data, err := os.ReadFile(path)
 	switch {
 	case err == nil:
@@ -295,6 +331,13 @@ func normalizeConfig(c Config) Config {
 		c.Access.Mode = AccessOff
 	}
 	c.Access.Sites = cleanPatterns(c.Access.Sites)
+
+	switch c.SSO.Mode {
+	case RestoreHosts, RestoreOff:
+	default:
+		c.SSO.Mode = RestoreAll
+	}
+	c.SSO.Hosts = cleanPatterns(c.SSO.Hosts)
 
 	groups := make([]Group, 0, len(c.Bookmarks))
 	for _, g := range c.Bookmarks {
@@ -361,6 +404,7 @@ func (c Config) clone() Config {
 	c.AllowedUsers = append([]string(nil), c.AllowedUsers...)
 	c.Admins = append([]string(nil), c.Admins...)
 	c.Access.Sites = append([]string(nil), c.Access.Sites...)
+	c.SSO.Hosts = append([]string(nil), c.SSO.Hosts...)
 	groups := make([]Group, len(c.Bookmarks))
 	copy(groups, c.Bookmarks)
 	for i := range groups {
@@ -398,9 +442,13 @@ func (s *Store) Set(c Config) error {
 	if err != nil {
 		return err
 	}
+	sso, err := parseSites(c.SSO.Hosts)
+	if err != nil {
+		return err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cfg, s.rules = c, rules
+	s.cfg, s.rules, s.sso = c, rules, sso
 	return s.save()
 }
 
@@ -419,6 +467,12 @@ func Validate(c Config) error {
 	}
 	if c.Access.Mode == AccessAllowlist && len(c.Access.Sites) == 0 {
 		return fmt.Errorf("白名单模式下站点清单不能为空，否则将无法访问任何站点")
+	}
+	if _, err := parseSites(c.SSO.Hosts); err != nil {
+		return err
+	}
+	if c.SSO.Mode == RestoreHosts && len(c.SSO.Hosts) == 0 {
+		return fmt.Errorf("按域名生效时 SSO 域名清单不能为空")
 	}
 	for _, g := range c.Bookmarks {
 		for _, it := range g.Items {
@@ -781,6 +835,26 @@ func (s *Store) AddrVerdict(addr netip.Addr) Verdict {
 		return Allow
 	}
 	return Neutral
+}
+
+// RestoresAddresses reports whether outbound parameters aimed at this target
+// should have gateway addresses put back to the real ones.
+func (s *Store) RestoresAddresses(host string) bool {
+	s.mu.RLock()
+	mode, rules := s.cfg.SSO.Mode, s.sso
+	s.mu.RUnlock()
+
+	switch mode {
+	case RestoreOff:
+		return false
+	case RestoreHosts:
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		return rules.matchHost(host)
+	default:
+		return true
+	}
 }
 
 // MatchAny reports whether any pattern matches the address.

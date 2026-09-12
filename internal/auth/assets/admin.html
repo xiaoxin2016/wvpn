@@ -340,6 +340,31 @@
   </section>
 
   <section>
+    <h2>单点登录</h2>
+    <p class="hint">应用跳转到 SSO 时，会带上 <code>redirect_uri</code>（或 <code>service</code>、<code>RelayState</code>）说明登录后返回哪里。
+      这个值由浏览器当前地址推导而来，经过网关后就变成了网关地址，身份提供方与注册的回调地址比对不上便会拒绝。
+      开启后，网关在请求发往目标站点前，把参数里的网关地址还原成真实地址；返回的跳转仍按常规改写。</p>
+
+    <div class="modes">
+      <label class="mode"><input type="radio" name="ssomode" value="all">
+        <span class="t">全部站点</span><span class="d">对所有目标还原参数中的地址</span></label>
+      <label class="mode"><input type="radio" name="ssomode" value="hosts">
+        <span class="t">按域名</span><span class="d">仅对清单内的站点生效</span></label>
+      <label class="mode"><input type="radio" name="ssomode" value="off">
+        <span class="t">关闭</span><span class="d">不改动请求参数</span></label>
+    </div>
+
+    <label for="sso-hosts">SSO 域名清单</label>
+    <textarea id="sso-hosts" spellcheck="false" placeholder="sso.corp.com&#10;*.account.corp.com"></textarea>
+    <p class="sub">匹配式与站点清单一致：填写域名时同时覆盖其子域。仅在“按域名”时生效。</p>
+
+    <div class="actions">
+      <button class="primary" id="save-sso">保存</button>
+      <span class="msg" id="sso-msg" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section>
     <h2>门户书签</h2>
     <p class="hint">门户首页展示的分组与链接。地址可省略协议，默认按 https 处理。</p>
     <div id="groups"></div>
@@ -377,6 +402,7 @@
                  gateway:{url_mode:"plain", base_domain:"", host:"", public_port:""},
                  tls:{cert:"", key:"", clear:false, key_set:false},
                  access:{mode:"off", sites:[]},
+                 sso:{mode:"all", hosts:[]},
                  bookmarks:[], smtp:{addr:"", from:"", username:"", tls_mode:"auto",
                                      allow_plaintext_auth:false, helo:"",
                                      insecure_skip_verify:false, password:"", clear_password:false,
@@ -399,6 +425,7 @@
   function apply(c){
     cfg = Object.assign(JSON.parse(JSON.stringify(EMPTY)), c);
     cfg.access = Object.assign({mode:"off", sites:[]}, cfg.access || {});
+    cfg.sso = Object.assign({mode:"all", hosts:[]}, cfg.sso || {});
     cfg.gateway = Object.assign({url_mode:"plain", base_domain:"", host:"", public_port:""}, cfg.gateway || {});
     cfg.tls = Object.assign({cert:"", key:"", clear:false, key_set:false}, cfg.tls || {});
     cfg.tls.key = ""; cfg.tls.clear = false;
@@ -433,6 +460,9 @@
     $("sites").value   = (cfg.access.sites || []).join("\n");
     const radio = document.querySelector('input[name=mode][value="' + cfg.access.mode + '"]');
     if (radio) radio.checked = true;
+    $("sso-hosts").value = (cfg.sso.hosts || []).join("\n");
+    const ssoRadio = document.querySelector('input[name=ssomode][value="' + cfg.sso.mode + '"]');
+    if (ssoRadio) ssoRadio.checked = true;
     renderGroups();
   }
 
@@ -464,6 +494,11 @@
   $("save-access").addEventListener("click", () => {
     const mode = (document.querySelector("input[name=mode]:checked") || {}).value || "off";
     save($("save-access"), $("access-msg"), {access: {mode: mode, sites: lines($("sites").value)}});
+  });
+
+  $("save-sso").addEventListener("click", () => {
+    const mode = (document.querySelector("input[name=ssomode]:checked") || {}).value || "all";
+    save($("save-sso"), $("sso-msg"), {sso: {mode: mode, hosts: lines($("sso-hosts").value)}});
   });
 
   function mailPatch(){
