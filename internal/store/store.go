@@ -128,7 +128,20 @@ type Gateway struct {
 	// PublicPort is the port browsers reach the gateway on, when it is not the
 	// default for the scheme.
 	PublicPort string `json:"public_port"`
+	// PublicScheme is what browsers reach the gateway with, which is not what
+	// this process serves wherever TLS is terminated in front of it. SchemeAuto
+	// reads it from each request, which needs the proxy in front to pass
+	// X-Forwarded-Proto; SchemeHTTPS says so outright.
+	PublicScheme string `json:"public_scheme"`
 }
+
+// Public scheme settings.
+const (
+	// SchemeAuto reads the browser's scheme off each request.
+	SchemeAuto = "auto"
+	// SchemeHTTPS declares every browser leg to be TLS.
+	SchemeHTTPS = "https"
+)
 
 // DefaultHostLabel is the first label of the portal's own name when none is
 // configured: with a wildcard on intra.corp.com the portal is app.intra.corp.com.
@@ -364,6 +377,12 @@ func normalizeConfig(c Config) Config {
 	c.Gateway.BaseDomain = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.BaseDomain), "."))
 	c.Gateway.Host = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.Host), "."))
 	c.Gateway.PublicPort = strings.TrimSpace(c.Gateway.PublicPort)
+	switch strings.ToLower(strings.TrimSpace(c.Gateway.PublicScheme)) {
+	case SchemeHTTPS:
+		c.Gateway.PublicScheme = SchemeHTTPS
+	default:
+		c.Gateway.PublicScheme = SchemeAuto
+	}
 
 	c.TLS.Cert = strings.TrimSpace(c.TLS.Cert)
 	c.TLS.Key = strings.TrimSpace(c.TLS.Key)
@@ -418,6 +437,12 @@ func (c Config) clone() Config {
 	c.Gateway.BaseDomain = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.BaseDomain), "."))
 	c.Gateway.Host = strings.ToLower(strings.Trim(strings.TrimSpace(c.Gateway.Host), "."))
 	c.Gateway.PublicPort = strings.TrimSpace(c.Gateway.PublicPort)
+	switch strings.ToLower(strings.TrimSpace(c.Gateway.PublicScheme)) {
+	case SchemeHTTPS:
+		c.Gateway.PublicScheme = SchemeHTTPS
+	default:
+		c.Gateway.PublicScheme = SchemeAuto
+	}
 
 	c.TLS.Cert = strings.TrimSpace(c.TLS.Cert)
 	c.TLS.Key = strings.TrimSpace(c.TLS.Key)
@@ -855,6 +880,14 @@ func (s *Store) RestoresAddresses(host string) bool {
 	default:
 		return true
 	}
+}
+
+// PublicHTTPS reports whether browsers are declared to reach the gateway over
+// https regardless of what this process itself serves.
+func (s *Store) PublicHTTPS() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.Gateway.PublicScheme == SchemeHTTPS
 }
 
 // MatchAny reports whether any pattern matches the address.

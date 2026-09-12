@@ -170,6 +170,7 @@ URL 模式、泛域名、门户主机、对外端口都在管理后台"网关地
 | --- | --- | --- |
 | 泛域名 | `intra.corp.com` | 目标站点的子域都挂在它下面，需把 `*.intra.corp.com` 解析到网关 |
 | 门户主机 | 留空即 `app.intra.corp.com` | 网关自己的页面：门户、登录、管理后台 |
+| 对外协议 | 自动识别 / 强制 HTTPS | 浏览器访问网关所用的协议，见[前置 nginx 与对外协议](#前置-nginx-与对外协议) |
 
 门户主机本身就落在泛域名之内，网关会把它排除在目标空间之外：`app.intra.corp.com` 不会被当成
 某个目标的编码，而一个恰好会编码到该名字的目标会退回 `/p/...` 路径形式，不会把控制台顶掉。
@@ -186,7 +187,31 @@ http://oa.intra.corp.com:8080/portal   → http://oa-intra-corp-com-p8080.intra.
 DNS 标签上限 63 字符，超长的主机名（以及 IPv6 字面量）自动回退到 `/p/...` 路径形式，
 该形式在网关的每个主机上都可用。
 
-### TLS 证书
+### 前置 nginx 与对外协议
+
+子域名模式写出的是**绝对地址**，其协议必须与浏览器正在使用的一致。网关不能按"自己是否监听
+HTTPS"来判断——TLS 由前置 nginx 终结时，网关自己是明文，于是会给 https 页面写出一片
+`http://` 子域地址。后果是连锁的：
+
+```
+页面 https://soc-corp-com-s.intra.corp.com
+请求 http://soc-corp-com-s.intra.corp.com/…    ← 同主机不同协议 = 跨源
+  → 混合内容（Chrome 默认直接拦掉）
+  → 跨源触发 CORS 预检 OPTIONS
+  → nginx 把 80 跳转到 443
+  → Redirect is not allowed for a preflight request
+```
+
+所以协议按**每个请求**判定：`r.TLS` 或前置代理传来的 `X-Forwarded-Proto`。nginx 侧确保有：
+
+```nginx
+proxy_set_header X-Forwarded-Proto $scheme;
+proxy_set_header X-Real-IP        $remote_addr;
+proxy_set_header Host             $host;   # 子域名模式必须保留原始 Host
+```
+
+若前置代理无法传这个头，在后台"网关地址 → 对外协议"里选**强制 HTTPS**，网关便一律按 https
+写地址。默认"自动识别"即按请求判定。
 
 子域名模式需要 `*.泛域名` 的泛域名证书——一张证书同时覆盖门户与全部目标子域。
 证书和私钥可以直接在后台"TLS 证书"里粘贴或选择文件，保存后会显示解析出的主体、颁发者、
