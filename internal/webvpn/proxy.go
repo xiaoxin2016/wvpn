@@ -252,17 +252,14 @@ func (h *Handler) serveGoto(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, ref, http.StatusFound)
 }
 
-// serveStray catches requests that escaped rewriting — typically a root-relative
-// URL built by a script the shim did not cover. The Referer still points into
-// the gateway, which is enough to work out where the request was headed.
+// serveStray catches requests that escaped rewriting — a URL a script built
+// from location.origin, or a root-relative one the shim did not cover. Under
+// the path codec the gateway has nothing at such a path, and answering 404 is
+// what a page reports as "failed to load"; it is nearly always a request meant
+// for the site the browser is reading.
 func (h *Handler) serveStray(w http.ResponseWriter, r *http.Request) {
-	ref, err := url.Parse(r.Header.Get("Referer"))
-	if err != nil || ref.Path == "" {
-		http.NotFound(w, r)
-		return
-	}
-	base, err := h.decode(ref.Host, ref.EscapedPath(), ref.RawQuery)
-	if err != nil {
+	base := h.strayBase(r)
+	if base == nil {
 		http.NotFound(w, r)
 		return
 	}
@@ -272,10 +269,23 @@ func (h *Handler) serveStray(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if enc := h.codec().Encode(target); enc != "" {
+		h.log.Printf("stray %s %s -> %s", r.Method, r.URL.RequestURI(), target)
 		http.Redirect(w, r, enc, http.StatusTemporaryRedirect)
 		return
 	}
 	http.NotFound(w, r)
+}
+
+// strayBase works out which site a stray request was meant for. The Referer
+// names the page exactly and is tried first; a browser whose site suppresses it
+// is attributed to the document that browser is currently on.
+func (h *Handler) strayBase(r *http.Request) *url.URL {
+	if ref, err := url.Parse(r.Header.Get("Referer")); err == nil && ref.Host != "" {
+		if base, err := h.decode(ref.Host, ref.EscapedPath(), ref.RawQuery); err == nil {
+			return base
+		}
+	}
+	return h.pages.current(h.browserKey(r))
 }
 
 // decode resolves an inbound request with whichever codec claims it.
@@ -561,7 +571,7 @@ func (h *Handler) rewriteBody(resp *http.Response, target *url.URL) error {
 // needs to know how this gateway addresses targets, or it would wrap an address
 // that is already a gateway address.
 func (h *Handler) inject(target *url.URL) string {
-	conf := map[string]string{"p": PlainPrefix, "t": target.String()}
+	conf := map[string]string{"p": PlainPrefix, "t": target.String(), "m": h.codec().Name()}
 	if hc, ok := h.codec().(*HostCodec); ok {
 		conf["b"] = hc.Base
 		conf["port"] = hc.Port
