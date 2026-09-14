@@ -350,6 +350,34 @@
   </section>
 
   <section>
+    <h2>会话与来源 IP</h2>
+
+    <div class="grid two">
+      <div>
+        <label for="session-minutes">会话有效期（分钟）</label>
+        <input id="session-minutes" type="number" min="5" max="1440" step="5" placeholder="60">
+        <p class="sub">多久没有使用就登出。时间越短，会话 Cookie 被窃取后可用的窗口越小。
+          打开着的页面会在临近到期时自动续期，所以正常使用不会被打断；关掉标签页就没人续了，
+          到期即结束。留空沿用启动参数 <code>-session-ttl</code>。</p>
+      </div>
+      <div>
+        <label>来源 IP</label>
+        <label class="check" style="margin-top:8px">
+          <input type="checkbox" id="forward-for"><span>向目标站点传递 <code>X-Forwarded-For</code></span>
+        </label>
+        <p class="sub">默认不传：网关的作用之一就是让目标站点看不到背后是谁，内网地址也不宜随手外泄。
+          目标站点需要按真实来源记录日志或做访问控制时再打开。传的是网关判定出的那一个地址，
+          不是浏览器带来的整条链——那条链是客户端想写什么就是什么。</p>
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="primary" id="save-policy">保存</button>
+      <span class="msg" id="policy-msg" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section>
     <h2>单点登录</h2>
     <p class="hint">应用跳转到 SSO 时，会带上 <code>redirect_uri</code>（或 <code>service</code>、<code>RelayState</code>）说明登录后返回哪里。
       这个值由浏览器当前地址推导而来，经过网关后就变成了网关地址，身份提供方与注册的回调地址比对不上便会拒绝。
@@ -413,6 +441,7 @@
                  tls:{cert:"", key:"", clear:false, key_set:false},
                  access:{mode:"off", sites:[]},
                  sso:{mode:"all", hosts:[]},
+                 policy:{session_minutes:0, forward_for:false},
                  bookmarks:[], smtp:{addr:"", from:"", username:"", tls_mode:"auto",
                                      allow_plaintext_auth:false, helo:"",
                                      insecure_skip_verify:false, password:"", clear_password:false,
@@ -436,6 +465,7 @@
     cfg = Object.assign(JSON.parse(JSON.stringify(EMPTY)), c);
     cfg.access = Object.assign({mode:"off", sites:[]}, cfg.access || {});
     cfg.sso = Object.assign({mode:"all", hosts:[]}, cfg.sso || {});
+    cfg.policy = Object.assign({session_minutes:0, forward_for:false}, cfg.policy || {});
     cfg.gateway = Object.assign({url_mode:"plain", base_domain:"", host:"", public_port:"", public_scheme:"auto"}, cfg.gateway || {});
     cfg.tls = Object.assign({cert:"", key:"", clear:false, key_set:false}, cfg.tls || {});
     cfg.tls.key = ""; cfg.tls.clear = false;
@@ -471,6 +501,8 @@
     $("sites").value   = (cfg.access.sites || []).join("\n");
     const radio = document.querySelector('input[name=mode][value="' + cfg.access.mode + '"]');
     if (radio) radio.checked = true;
+    $("session-minutes").value = cfg.policy.session_minutes ? cfg.policy.session_minutes : "";
+    $("forward-for").checked = !!cfg.policy.forward_for;
     $("sso-hosts").value = (cfg.sso.hosts || []).join("\n");
     const ssoRadio = document.querySelector('input[name=ssomode][value="' + cfg.sso.mode + '"]');
     if (ssoRadio) ssoRadio.checked = true;
@@ -505,6 +537,14 @@
   $("save-access").addEventListener("click", () => {
     const mode = (document.querySelector("input[name=mode]:checked") || {}).value || "off";
     save($("save-access"), $("access-msg"), {access: {mode: mode, sites: lines($("sites").value)}});
+  });
+
+  $("save-policy").addEventListener("click", () => {
+    const raw = $("session-minutes").value.trim();
+    save($("save-policy"), $("policy-msg"), {policy: {
+      session_minutes: raw === "" ? 0 : parseInt(raw, 10) || 0,
+      forward_for: $("forward-for").checked
+    }});
   });
 
   $("save-sso").addEventListener("click", () => {
@@ -760,6 +800,49 @@
   loadConfig(); loadSessions();
   setInterval(loadSessions, 30000);
 })();
+
+  // ---- keep the sign-in alive -----------------------------------------------
+  //
+  // A sign-in lasts an hour by default, which bounds what a stolen session
+  // cookie is worth. An hour is also less than a working session, so a page
+  // that is open asks for it to be extended shortly before it runs out. Close
+  // the tab and nothing asks: the sign-in then ends when it expires.
+  (function () {
+    var RENEW = "/_wv/session/renew";
+    var timer = null;
+
+    function schedule(seconds) {
+      if (timer) clearTimeout(timer);
+      // Come back a minute early, and never sooner than every half minute.
+      var wait = Math.max(30, (seconds || 300) - 60);
+      timer = setTimeout(renew, wait * 1000);
+    }
+
+    function renew() {
+      fetch(RENEW, { method: "POST", credentials: "same-origin", cache: "no-store" })
+        .then(function (r) {
+          if (r.status === 401) throw new Error("expired");
+          return r.json();
+        })
+        .then(function (j) { schedule(j && j.expires_in); })
+        .catch(function (e) {
+          if (String(e && e.message) === "expired") { onExpired(); return; }
+          schedule(60); // a blip in the network is not an expiry
+        });
+    }
+
+
+    function onExpired() {
+      location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+    }
+
+    // Ask once on load to learn how long this sign-in has left.
+    renew();
+    // A tab that was asleep may have missed its turn; check on the way back.
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) renew();
+    });
+  })();
 </script>
 </body>
 </html>

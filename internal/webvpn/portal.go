@@ -134,3 +134,9 @@ func (h *Handler) SetIdentity(id Identity, sessionCookie string) {
 	h.opts.Identity = id
 	h.opts.SessionCookie = sessionCookie
 }
+
+// SetClientIP names where a request's browser is, for the targets the operator
+// chooses to tell.
+func (h *Handler) SetClientIP(fn func(*http.Request) string) {
+	h.opts.ClientIP = fn
+}

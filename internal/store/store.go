@@ -49,7 +49,29 @@ type Config struct {
 	TLS TLS `json:"tls"`
 	// SSO governs putting real addresses back into outbound requests.
 	SSO SSO `json:"sso"`
+	// Policy holds the runtime knobs an operator tunes without a restart.
+	Policy Policy `json:"policy"`
 }
+
+// Policy is what an administrator can tighten or loosen while the gateway runs.
+type Policy struct {
+	// SessionMinutes is how long a sign-in survives without use. A short life
+	// bounds what a stolen session cookie is worth; the pages the gateway
+	// serves renew it while they are open, so it costs a working browser
+	// nothing. Zero means the value the command line set.
+	SessionMinutes int `json:"session_minutes"`
+	// ForwardFor passes the browser's address to the target in
+	// X-Forwarded-For. It is off by default: a gateway exists partly so the
+	// target does not learn who is behind it, and internal addresses are not
+	// something to hand out by accident.
+	ForwardFor bool `json:"forward_for"`
+}
+
+// Session lifetime bounds, in minutes.
+const (
+	MinSessionMinutes = 5
+	MaxSessionMinutes = 24 * 60
+)
 
 // TLS is the gateway's own certificate and private key, both PEM encoded. A
 // sub-domain deployment needs a wildcard certificate for the domain targets are
@@ -352,6 +374,10 @@ func normalizeConfig(c Config) Config {
 	}
 	c.SSO.Hosts = cleanPatterns(c.SSO.Hosts)
 
+	if c.Policy.SessionMinutes < 0 {
+		c.Policy.SessionMinutes = 0
+	}
+
 	groups := make([]Group, 0, len(c.Bookmarks))
 	for _, g := range c.Bookmarks {
 		g.Name = strings.TrimSpace(g.Name)
@@ -498,6 +524,9 @@ func Validate(c Config) error {
 	}
 	if c.SSO.Mode == RestoreHosts && len(c.SSO.Hosts) == 0 {
 		return fmt.Errorf("按域名生效时 SSO 域名清单不能为空")
+	}
+	if n := c.Policy.SessionMinutes; n != 0 && (n < MinSessionMinutes || n > MaxSessionMinutes) {
+		return fmt.Errorf("会话有效期需在 %d 到 %d 分钟之间", MinSessionMinutes, MaxSessionMinutes)
 	}
 	for _, g := range c.Bookmarks {
 		for _, it := range g.Items {
@@ -880,6 +909,21 @@ func (s *Store) RestoresAddresses(host string) bool {
 	default:
 		return true
 	}
+}
+
+// SessionMinutes is the configured sign-in lifetime, or 0 when the command
+// line's own value stands.
+func (s *Store) SessionMinutes() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.Policy.SessionMinutes
+}
+
+// ForwardsFor reports whether the browser's address is passed to targets.
+func (s *Store) ForwardsFor() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.cfg.Policy.ForwardFor
 }
 
 // PublicHTTPS reports whether browsers are declared to reach the gateway over

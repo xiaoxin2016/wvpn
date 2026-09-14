@@ -108,7 +108,8 @@ func main() {
 	flag.StringVar(&c.defaultDomain, "default-domain", "", "initial default e-mail domain, e.g. test.com")
 	flag.StringVar(&c.allowUsers, "allow-user", "", "initial comma-separated allowlist of accounts, e.g. \"*@test.com\"")
 	flag.StringVar(&c.admins, "admin", "", "initial comma-separated admin accounts")
-	flag.DurationVar(&c.sessionTTL, "session-ttl", 12*time.Hour, "how long a sign-in lasts")
+	flag.DurationVar(&c.sessionTTL, "session-ttl", time.Hour,
+		"how long a sign-in survives without use; the console can change it afterwards")
 	flag.DurationVar(&c.codeTTL, "code-ttl", 5*time.Minute, "how long a verification code stays valid")
 
 	flag.BoolVar(&c.ignoreEmail, "ignore-email", false, "print verification codes to the console instead of mailing them")
@@ -210,6 +211,7 @@ func run(c config, logger *log.Logger) error {
 			return cfg.RestoresAddresses(target.Host)
 		},
 		ForceSecure: cfg.PublicHTTPS,
+		ForwardFor:  cfg.ForwardsFor,
 		Portal: webvpn.Portal{
 			Name:      c.portal,
 			Bookmarks: func() []webvpn.Category { return categories(cfg) },
@@ -240,6 +242,7 @@ func run(c config, logger *log.Logger) error {
 		}
 		defer manager.Close()
 		gateway.SetIdentity(identity{manager}, manager.CookieName())
+		gateway.SetClientIP(manager.ClientIP)
 		handler = manager.Require(gateway)
 		manager.SetFallback(handler)
 		manager.Routes(mux)

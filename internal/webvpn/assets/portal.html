@@ -251,6 +251,49 @@
 
   renderRecent();
 })();
+
+  // ---- keep the sign-in alive -----------------------------------------------
+  //
+  // A sign-in lasts an hour by default, which bounds what a stolen session
+  // cookie is worth. An hour is also less than a working session, so a page
+  // that is open asks for it to be extended shortly before it runs out. Close
+  // the tab and nothing asks: the sign-in then ends when it expires.
+  (function () {
+    var RENEW = "/_wv/session/renew";
+    var timer = null;
+
+    function schedule(seconds) {
+      if (timer) clearTimeout(timer);
+      // Come back a minute early, and never sooner than every half minute.
+      var wait = Math.max(30, (seconds || 300) - 60);
+      timer = setTimeout(renew, wait * 1000);
+    }
+
+    function renew() {
+      fetch(RENEW, { method: "POST", credentials: "same-origin", cache: "no-store" })
+        .then(function (r) {
+          if (r.status === 401) throw new Error("expired");
+          return r.json();
+        })
+        .then(function (j) { schedule(j && j.expires_in); })
+        .catch(function (e) {
+          if (String(e && e.message) === "expired") { onExpired(); return; }
+          schedule(60); // a blip in the network is not an expiry
+        });
+    }
+
+
+    function onExpired() {
+      location.href = "/login?next=" + encodeURIComponent(location.pathname + location.search);
+    }
+
+    // Ask once on load to learn how long this sign-in has left.
+    renew();
+    // A tab that was asleep may have missed its turn; check on the way back.
+    document.addEventListener("visibilitychange", function () {
+      if (!document.hidden) renew();
+    });
+  })();
 </script>
 </body>
 </html>
