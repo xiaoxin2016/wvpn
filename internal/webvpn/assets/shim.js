@@ -520,6 +520,48 @@
     } catch (e) {}
   })();
 
+  // ---- keeping the sign-in alive -------------------------------------------
+  //
+  // A sign-in lasts an hour, which bounds what a stolen session cookie is
+  // worth. A page being read for longer than that is not idle, so it asks for
+  // the sign-in to be extended shortly before it runs out. The request goes to
+  // this page's own origin: under the sub-domain codec that is the proxied
+  // host, and the gateway answers there too, which is what keeps the ask
+  // same-origin and the cookie attached.
+  //
+  // Nothing is done when it has expired: the next thing the page asks for is
+  // bounced to the sign-in page by the gateway, which is both correct and less
+  // destructive than navigating away from whatever the reader was doing.
+  if (SESSION !== "") {
+    (function () {
+      var timer = null;
+
+      function schedule(seconds) {
+        if (timer) clearTimeout(timer);
+        var wait = Math.max(30, (seconds || 300) - 60);
+        timer = setTimeout(renew, wait * 1000);
+      }
+
+      function renew() {
+        fetch(ASSETS + "session/renew", {
+          method: "POST",
+          credentials: "same-origin",
+          cache: "no-store",
+        }).then(function (r) {
+          if (r.status === 401) return null; // signed out; stop asking
+          return r.json().then(function (j) { schedule(j && j.expires_in); });
+        }).catch(function () {
+          schedule(60); // a blip in the network is not an expiry
+        });
+      }
+
+      renew();
+      document.addEventListener("visibilitychange", function () {
+        if (!document.hidden) renew();
+      });
+    })();
+  }
+
   // ---- history -------------------------------------------------------------
 
   ["pushState", "replaceState"].forEach(function (name) {

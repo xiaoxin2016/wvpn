@@ -51,6 +51,7 @@ func originServer(t *testing.T) *httptest.Server {
 		io.WriteString(w, "origin="+r.Header.Get("Origin")+"\n")
 		io.WriteString(w, "cookie="+r.Header.Get("Cookie")+"\n")
 		io.WriteString(w, "accept-encoding="+r.Header.Get("Accept-Encoding")+"\n")
+		io.WriteString(w, "forwarded-for="+r.Header.Get("X-Forwarded-For")+"\n")
 	})
 
 	srv := httptest.NewServer(mux)
@@ -428,5 +429,38 @@ func TestCodecCanChangeAtRuntime(t *testing.T) {
 	_, body = get(t, client, gw.URL+"/p/http/"+host+"/", nil)
 	if !strings.Contains(body, `href="`+want+`"`) {
 		t.Errorf("the new scheme did not take effect, want %q:\n%s", want, body)
+	}
+}
+
+func TestForwardedForIsTheOperatorsChoice(t *testing.T) {
+	origin := originServer(t)
+	host := originHost(t, origin)
+	forward := false
+
+	gw, client := gatewayFor(t, Options{
+		ForwardFor: func() bool { return forward },
+		ClientIP:   func(*http.Request) string { return "10.1.2.3" },
+	})
+
+	// Off by default, and a chain the browser arrived with is not passed on:
+	// the gateway exists partly so the target does not learn who is behind it.
+	_, body := get(t, client, gw.URL+"/p/http/"+host+"/echo", map[string]string{
+		"X-Forwarded-For": "203.0.113.9",
+	})
+	if strings.Contains(body, "203.0.113.9") || strings.Contains(body, "10.1.2.3") {
+		t.Errorf("an address reached the target with forwarding off:\n%s", body)
+	}
+
+	// On, the target is told the one address the gateway settled on — not the
+	// chain, which is whatever the client cared to claim.
+	forward = true
+	_, body = get(t, client, gw.URL+"/p/http/"+host+"/echo", map[string]string{
+		"X-Forwarded-For": "203.0.113.9",
+	})
+	if !strings.Contains(body, "forwarded-for=10.1.2.3") {
+		t.Errorf("the target was not told the browser's address:\n%s", body)
+	}
+	if strings.Contains(body, "203.0.113.9") {
+		t.Errorf("a claimed chain was passed through:\n%s", body)
 	}
 }

@@ -36,7 +36,7 @@ type Options struct {
 	// MailBody is a text/template rendered with .Code, .Minutes and .Email.
 	MailBody string
 
-	SessionTTL     time.Duration // default 12h
+	SessionTTL     time.Duration // default 1h
 	CodeTTL        time.Duration // default 5m
 	ResendInterval time.Duration // default 60s
 	MaxAttempts    int           // default 5
@@ -149,6 +149,16 @@ func (m *Manager) gatewayOnly(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// sessionTTL is how long a sign-in survives without use. The console owns it so
+// an operator can tighten it without a restart; the command line supplies the
+// value until they do.
+func (m *Manager) sessionTTL() time.Duration {
+	if n := m.store.SessionMinutes(); n > 0 {
+		return time.Duration(n) * time.Minute
+	}
+	return m.opts.SessionTTL
+}
+
 // Session is a signed-in browser.
 type Session struct {
 	ID        string    `json:"id"`
@@ -204,7 +214,7 @@ func New(opts Options) (*Manager, error) {
 		return nil, errors.New("auth: Mailer is required")
 	}
 	if opts.SessionTTL <= 0 {
-		opts.SessionTTL = 12 * time.Hour
+		opts.SessionTTL = time.Hour
 	}
 	if opts.CodeTTL <= 0 {
 		opts.CodeTTL = 5 * time.Minute
@@ -332,6 +342,49 @@ func (m *Manager) Routes(mux *http.ServeMux) {
 	route("GET /admin/api/sessions", m.requireAdminAPI(m.handleListSessions))
 	route("POST /admin/api/sessions/revoke", m.requireAdminAPI(m.handleRevokeSession))
 	route("POST /admin/api/smtp/test", m.requireAdminAPI(m.handleTestMail))
+
+	// Renewal answers on every host the gateway serves, not just the portal:
+	// a page open on a proxied site has to be able to keep the sign-in alive
+	// too, and under the sub-domain codec that page is on a host of its own.
+	mux.HandleFunc(RenewPath, m.handleRenew)
+}
+
+// RenewPath is where a page asks for its sign-in to be extended. It sits under
+// the prefix the gateway reserves on every host it answers.
+const RenewPath = "POST /_wv/session/renew"
+
+// handleRenew pushes a live session's expiry out to a full lifetime and
+// re-issues the cookie with it.
+//
+// Sliding the session server-side is not enough on its own: the cookie carries
+// its own lifetime, and a browser that has been told the cookie expires in an
+// hour discards it on the hour no matter what the gateway thinks. So the answer
+// re-sets the cookie, and tells the page how long it has, which is what lets the
+// page come back before that runs out.
+func (m *Manager) handleRenew(w http.ResponseWriter, r *http.Request) {
+	if !sameOrigin(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "跨站请求"})
+		return
+	}
+	s, ok := m.SessionFor(r) // slides the expiry when it is running down
+	if !ok {
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"ok": false, "error": "登录态已失效"})
+		return
+	}
+	ttl := m.sessionTTL()
+	now := m.now()
+	m.mu.Lock()
+	if live, found := m.sessions[s.token]; found {
+		live.Expires = now.Add(ttl)
+		s = live
+	}
+	m.mu.Unlock()
+
+	http.SetCookie(w, m.cookie(s.token, ttl))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":         true,
+		"expires_in": int(s.Expires.Sub(now).Seconds()),
+	})
 }
 
 // Require rejects unauthenticated requests: browsers are sent to the sign-in
@@ -386,8 +439,9 @@ func (m *Manager) SessionFor(r *http.Request) (*Session, bool) {
 		}
 		if ok {
 			// Sliding expiry: an active browser is not logged out mid-session.
-			if remaining := s.Expires.Sub(now); remaining < m.opts.SessionTTL/2 {
-				s.Expires = now.Add(m.opts.SessionTTL)
+			ttl := m.sessionTTL()
+			if remaining := s.Expires.Sub(now); remaining < ttl/2 {
+				s.Expires = now.Add(ttl)
 			}
 			s.Admin = m.store.IsAdmin(s.Email)
 			cp := *s
@@ -511,6 +565,10 @@ func (m *Manager) rateLimited(ip string) bool {
 // therefore honoured when the immediate peer is loopback — a local reverse
 // proxy — or when the operator has said to trust them outright. A client that
 // reaches the gateway directly cannot talk its way into a different address.
+// ClientIP is the address the gateway holds a request's browser at, after the
+// trust rules for a proxy in front have been applied.
+func (m *Manager) ClientIP(r *http.Request) string { return m.clientIP(r) }
+
 func (m *Manager) clientIP(r *http.Request) string {
 	peer := peerIP(r)
 	if !m.opts.TrustProxyHeaders && !isLoopbackAddr(peer) {
@@ -682,7 +740,7 @@ func (m *Manager) handleVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "服务暂时不可用"})
 		return
 	}
-	http.SetCookie(w, m.cookie(s.token, m.opts.SessionTTL))
+	http.SetCookie(w, m.cookie(s.token, m.sessionTTL()))
 	if s.Admin {
 		// The gateway has now been shown to work end to end, so the one-time
 		// setup link can stop working.
@@ -707,7 +765,7 @@ func (m *Manager) newSession(email string, r *http.Request) (*Session, error) {
 		Email:     email,
 		Admin:     m.store.IsAdmin(email),
 		Created:   now,
-		Expires:   now.Add(m.opts.SessionTTL),
+		Expires:   now.Add(m.sessionTTL()),
 		IP:        m.clientIP(r),
 		UserAgent: truncate(r.UserAgent(), 200),
 		token:     token,
@@ -803,6 +861,7 @@ type adminConfig struct {
 	Gateway       store.Gateway `json:"gateway"`
 	TLS           adminTLS      `json:"tls"`
 	SSO           store.SSO     `json:"sso"`
+	Policy        store.Policy  `json:"policy"`
 }
 
 // adminTLS carries the gateway's certificate. The certificate itself is public
@@ -849,6 +908,7 @@ func viewOf(c store.Config) adminConfig {
 		Gateway:       c.Gateway,
 		TLS:           tlsView(c.TLS),
 		SSO:           c.SSO,
+		Policy:        c.Policy,
 		SMTP: adminSMTP{
 			Addr:           c.SMTP.Addr,
 			From:           c.SMTP.From,
@@ -874,6 +934,7 @@ func merge(in adminConfig, current store.Config) store.Config {
 		Gateway:       in.Gateway,
 		TLS:           mergeTLS(in.TLS, current.TLS),
 		SSO:           in.SSO,
+		Policy:        in.Policy,
 		SMTP: store.SMTP{
 			Addr:               in.SMTP.Addr,
 			From:               in.SMTP.From,

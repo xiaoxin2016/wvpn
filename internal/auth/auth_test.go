@@ -896,3 +896,138 @@ func testKeyPair(t *testing.T) (certPEM, keyPEM string) {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
 		string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 }
+
+// newTimedManager is a Manager whose clock the test drives.
+func newTimedManager(t *testing.T, cfg store.Config, now *time.Time) (*Manager, captureMailer) {
+	t.Helper()
+	mailer := captureMailer{ch: make(chan [3]string, 4)}
+	m, err := New(Options{
+		Store:  newStore(t, cfg),
+		Mailer: mailer,
+		Logger: log.New(os.Stderr, "test ", 0),
+		Now:    func() time.Time { return *now },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(m.Close)
+	return m, mailer
+}
+
+// mustGet fetches a URL with the browser's own jar attached.
+func mustGet(t *testing.T, client *http.Client, url string) *http.Response {
+	t.Helper()
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	return resp
+}
+
+func TestSessionEndsWhenNobodyRenewsIt(t *testing.T) {
+	clock := time.Now()
+	cfg := store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+		Policy:        store.Policy{SessionMinutes: 30},
+	}
+	m, mailer := newTimedManager(t, cfg, &clock)
+	srv, client := newServer(t, m)
+	signIn(t, client, srv, mailer, "root")
+
+	// Being used keeps it alive: past the half-life, a request slides it on.
+	clock = clock.Add(20 * time.Minute)
+	if resp := mustGet(t, client, srv.URL+"/"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("an in-use session was dropped: %d", resp.StatusCode)
+	}
+
+	// Left alone for a full lifetime, it ends: a browser is sent to the
+	// sign-in page, anything else is simply refused.
+	clock = clock.Add(31 * time.Minute)
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/html")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusFound {
+		t.Fatalf("an idle session survived its lifetime: %d", resp.StatusCode)
+	}
+	if loc := resp.Header.Get("Location"); !strings.Contains(loc, "/login") {
+		t.Errorf("expired session was not sent to the sign-in page: %q", loc)
+	}
+	if resp := mustGet(t, client, srv.URL+"/"); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("an expired session gave %d to a plain request, want 401", resp.StatusCode)
+	}
+}
+
+func TestRenewExtendsTheSessionAndItsCookie(t *testing.T) {
+	clock := time.Now()
+	cfg := store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+		Policy:        store.Policy{SessionMinutes: 30},
+	}
+	m, mailer := newTimedManager(t, cfg, &clock)
+	srv, client := newServer(t, m)
+	signIn(t, client, srv, mailer, "root")
+
+	renew := func() (*http.Response, map[string]any) {
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/_wv/session/renew", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Origin", srv.URL)
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp, out
+	}
+
+	// A page that keeps asking never loses the session, however long it is open.
+	for i := 0; i < 5; i++ {
+		clock = clock.Add(25 * time.Minute)
+		resp, out := renew()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("renewal %d gave %d", i, resp.StatusCode)
+		}
+		if got := out["expires_in"]; got != float64(30*60) {
+			t.Errorf("renewal %d reported %v seconds left, want %d", i, got, 30*60)
+		}
+		// The cookie carries its own lifetime, so it has to be re-issued too —
+		// otherwise the browser drops it on the original deadline no matter
+		// what the gateway thinks.
+		var reissued *http.Cookie
+		for _, c := range resp.Cookies() {
+			if c.Name == m.CookieName() {
+				reissued = c
+			}
+		}
+		if reissued == nil {
+			t.Fatalf("renewal %d did not re-issue the cookie", i)
+		}
+		if reissued.MaxAge != 30*60 {
+			t.Errorf("re-issued cookie lives %ds, want %d", reissued.MaxAge, 30*60)
+		}
+	}
+	if resp := mustGet(t, client, srv.URL+"/"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("a renewed session was dropped after two hours: %d", resp.StatusCode)
+	}
+
+	// Once it is gone, renewal says so rather than quietly starting a new one.
+	clock = clock.Add(2 * time.Hour)
+	if resp, _ := renew(); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("renewing an expired session gave %d, want 401", resp.StatusCode)
+	}
+}

@@ -46,6 +46,13 @@ type Options struct {
 	// JSScope bounds the rewriting of absolute URLs inside scripts and JSON.
 	JSScope JSScope
 
+	// ForwardFor reports whether the browser's address is passed on to the
+	// target in X-Forwarded-For. Nil withholds it, which is the default: a
+	// gateway is partly there so the target does not learn who is behind it.
+	ForwardFor func() bool
+	// ClientIP is the address the gateway holds this request's browser at.
+	ClientIP func(r *http.Request) string
+
 	// ForceSecure declares that browsers reach this gateway over https even
 	// though this process serves plain http — TLS terminated in front of it.
 	// Without it the scheme is read from the request, which needs the proxy to
@@ -99,6 +106,8 @@ type reqInfo struct {
 	// browserHost is the gateway host the browser asked, which is the only way
 	// to name the gateway in an address a script will hold on to.
 	browserHost string
+	// clientIP is where the browser is, for the targets that are told.
+	clientIP string
 }
 
 func withInfo(ctx context.Context, info *reqInfo) context.Context {
@@ -481,6 +490,9 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 		jarKey:      h.sessionKey(r),
 		browserHost: r.Host,
 	}
+	if h.opts.ForwardFor != nil && h.opts.ForwardFor() && h.opts.ClientIP != nil {
+		info.clientIP = h.opts.ClientIP(r)
+	}
 	info.page = h.pages.record(h.browserKey(r), target, isDocumentRequest(r))
 	h.rp.ServeHTTP(w, r.WithContext(withInfo(r.Context(), info)))
 }
@@ -572,10 +584,18 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 		pr.Out.Header.Set("Origin", real)
 	}
 
-	// Do not advertise the gateway or its client to the origin.
-	pr.Out.Header.Del("X-Forwarded-For")
+	// Do not advertise the gateway to the origin: a forwarded host or scheme
+	// would describe the gateway, not the site, and the site would believe it.
 	pr.Out.Header.Del("X-Forwarded-Host")
 	pr.Out.Header.Del("X-Forwarded-Proto")
+	// Who is behind the gateway is the operator's call. What is forwarded is the
+	// address the gateway itself settled on, not the chain the browser arrived
+	// with — that chain is whatever a client cared to claim.
+	if info.clientIP != "" {
+		pr.Out.Header.Set("X-Forwarded-For", info.clientIP)
+	} else {
+		pr.Out.Header.Del("X-Forwarded-For")
+	}
 }
 
 // strippedResponseHeaders would either pin the browser to the gateway origin or
