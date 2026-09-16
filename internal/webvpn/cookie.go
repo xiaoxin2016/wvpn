@@ -143,12 +143,17 @@ func (sc setCookie) originPath() string {
 //
 // A Domain attribute means the origin wants the cookie back from every host in
 // that domain — which is how single sign-on carries a login from the identity
-// provider to the applications. The gateway cannot express that in the browser,
-// where all of those hosts share one origin and are separated only by path, so
-// such cookies are kept server-side instead.
+// provider to the applications. The gateway cannot express that reach in the
+// browser, where those hosts are either one origin separated by path or one
+// origin each, so the jar holds the copy that travels between them.
 //
-// A cookie whose domain is the host that set it is kept in both places: the jar
-// so sub-domains see it, the browser so the site's own scripts still can.
+// The browser still gets a copy, scoped to where this target is served: the
+// site's own scripts read their own cookies through document.cookie, and behind
+// the gateway that copy is the only one they can see. A login that hands the
+// page a token and expects to read it back on the next call depends on it.
+// Scoping keeps it honest — under the path codecs the copy lives on this
+// target's path, under the sub-domain codec on this target's host — so it
+// reaches the site that set it and no other.
 func (sc setCookie) domainScope(target *url.URL) (jar, browser bool) {
 	domain, ok := sc.attr("domain")
 	if !ok || strings.TrimSpace(domain) == "" {
@@ -156,11 +161,8 @@ func (sc setCookie) domainScope(target *url.URL) (jar, browser bool) {
 	}
 	domain = strings.ToLower(strings.TrimPrefix(strings.TrimSpace(domain), "."))
 	host := strings.ToLower(target.Hostname())
-	switch {
-	case domain == host:
+	if domain == host || strings.HasSuffix(host, "."+domain) {
 		return true, true
-	case strings.HasSuffix(host, "."+domain):
-		return true, false
 	}
 	// A domain the host does not belong to: the origin is confused, and the
 	// browser would reject it too.
