@@ -6,14 +6,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"mime"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/http/httputil"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +48,12 @@ type Options struct {
 	InsecureTLS bool
 	// JSScope bounds the rewriting of absolute URLs inside scripts and JSON.
 	JSScope JSScope
+
+	// LogHeaders writes every proxied request's outbound headers and every
+	// response's Set-Cookie to the log. It is a debugging aid for working out
+	// how a request the gateway sends differs from the one a browser would have
+	// sent directly, and it writes session cookies and tokens in clear.
+	LogHeaders bool
 
 	// ForwardFor reports whether the browser's address is passed on to the
 	// target in X-Forwarded-For. Nil withholds it, which is the default: a
@@ -584,6 +593,9 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 		pr.Out.Header.Set("Origin", real)
 	}
 
+	defer h.logRequest(pr)
+	h.traceUpstream(pr)
+
 	// Do not advertise the gateway to the origin: a forwarded host or scheme
 	// would describe the gateway, not the site, and the site would believe it.
 	pr.Out.Header.Del("X-Forwarded-Host")
@@ -596,6 +608,73 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 	} else {
 		pr.Out.Header.Del("X-Forwarded-For")
 	}
+}
+
+// traceUpstream reports which upstream address each request actually reached.
+// A site behind a load balancer may keep its session on one node, and a session
+// that works in a browser but not through the gateway is often a request that
+// landed somewhere else.
+func (h *Handler) traceUpstream(pr *httputil.ProxyRequest) {
+	if !h.opts.LogHeaders {
+		return
+	}
+	url := pr.Out.URL.String()
+	trace := &httptrace.ClientTrace{
+		GotConn: func(ci httptrace.GotConnInfo) {
+			h.log.Printf("upstream conn %s -> %s (reused=%v)", url, ci.Conn.RemoteAddr(), ci.Reused)
+		},
+	}
+	pr.Out = pr.Out.WithContext(httptrace.WithClientTrace(pr.Out.Context(), trace))
+}
+
+// logRequest records what the gateway is about to send upstream, next to what
+// the browser asked for, so the two can be compared header by header.
+func (h *Handler) logRequest(pr *httputil.ProxyRequest) {
+	if !h.opts.LogHeaders {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "upstream %s %s\n", pr.Out.Method, pr.Out.URL)
+	fmt.Fprintf(&b, "  Host: %s\n", pr.Out.Host)
+	for _, k := range sortedKeys(pr.Out.Header) {
+		for _, v := range pr.Out.Header[k] {
+			fmt.Fprintf(&b, "  %s: %s\n", k, v)
+		}
+	}
+	// What the browser sent, for the headers the gateway changed or dropped.
+	for _, k := range sortedKeys(pr.In.Header) {
+		if _, kept := pr.Out.Header[k]; !kept {
+			for _, v := range pr.In.Header[k] {
+				fmt.Fprintf(&b, "  (dropped) %s: %s\n", k, v)
+			}
+		}
+	}
+	h.log.Print(b.String())
+}
+
+// logResponse records what the origin set on the way back.
+func (h *Handler) logResponse(resp *http.Response, raws []string) {
+	if !h.opts.LogHeaders {
+		return
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "origin %d %s\n", resp.StatusCode, resp.Request.URL)
+	for _, raw := range raws {
+		fmt.Fprintf(&b, "  (origin) Set-Cookie: %s\n", raw)
+	}
+	for _, v := range resp.Header.Values("Set-Cookie") {
+		fmt.Fprintf(&b, "  (browser) Set-Cookie: %s\n", v)
+	}
+	h.log.Print(b.String())
+}
+
+func sortedKeys(h http.Header) []string {
+	keys := make([]string, 0, len(h))
+	for k := range h {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // strippedResponseHeaders would either pin the browser to the gateway origin or
@@ -674,6 +753,7 @@ func (h *Handler) modifyResponse(resp *http.Response) error {
 // instead, because the gateway has no second domain to put them on.
 func (h *Handler) rewriteCookies(resp *http.Response, info *reqInfo) {
 	raws := resp.Header.Values("Set-Cookie")
+	defer h.logResponse(resp, raws)
 	if len(raws) == 0 {
 		return
 	}

@@ -63,6 +63,7 @@ type config struct {
 	allowUsers    string
 	admins        string
 	sessionTTL    time.Duration
+	logHeaders    bool
 	codeTTL       time.Duration
 
 	ignoreEmail  bool
@@ -108,6 +109,8 @@ func main() {
 	flag.StringVar(&c.defaultDomain, "default-domain", "", "initial default e-mail domain, e.g. test.com")
 	flag.StringVar(&c.allowUsers, "allow-user", "", "initial comma-separated allowlist of accounts, e.g. \"*@test.com\"")
 	flag.StringVar(&c.admins, "admin", "", "initial comma-separated admin accounts")
+	flag.BoolVar(&c.logHeaders, "log-headers", false,
+		"log every proxied request's outbound headers and every Set-Cookie, to compare with what a browser sends directly; writes cookies and tokens in clear")
 	flag.DurationVar(&c.sessionTTL, "session-ttl", time.Hour,
 		"how long a sign-in survives without use; the console can change it afterwards")
 	flag.DurationVar(&c.codeTTL, "code-ttl", 5*time.Minute, "how long a verification code stays valid")
@@ -212,6 +215,7 @@ func run(c config, logger *log.Logger) error {
 		},
 		ForceSecure: cfg.PublicHTTPS,
 		ForwardFor:  cfg.ForwardsFor,
+		LogHeaders:  c.logHeaders,
 		Portal: webvpn.Portal{
 			Name:      c.portal,
 			Bookmarks: func() []webvpn.Category { return categories(cfg) },
@@ -443,6 +447,9 @@ func warn(c config, logger *log.Logger) {
 	}
 	if c.insecureTLS {
 		logger.Print("warning: -insecure-tls disables upstream certificate verification")
+	}
+	if c.logHeaders {
+		logger.Print("warning: -log-headers writes session cookies and tokens to this log in clear; turn it off once the problem is understood")
 	}
 	if c.smtpPlain {
 		logger.Print("warning: -smtp-allow-plaintext-auth sends the SMTP password over an unencrypted connection")
