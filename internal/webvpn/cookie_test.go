@@ -68,9 +68,11 @@ func TestDomainScope(t *testing.T) {
 	}{
 		{"a=1; Path=/", false, true},                 // host-only
 		{"a=1; Domain=app.corp.example", true, true}, // its own host
-		{"a=1; Domain=.corp.example", true, false},   // shared by SSO
-		{"a=1; Domain=corp.example", true, false},    // same, no dot
-		{"a=1; Domain=other.example", false, false},  // a browser rejects this too
+		// Shared by sign-on: the jar carries it between hosts, and the browser
+		// keeps a scoped copy so the site's own scripts can still read it.
+		{"a=1; Domain=.corp.example", true, true},
+		{"a=1; Domain=corp.example", true, true},    // same, no dot
+		{"a=1; Domain=other.example", false, false}, // a browser rejects this too
 	}
 	for _, tc := range cases {
 		sc, _ := parseSetCookie(tc.raw)
@@ -158,12 +160,26 @@ func TestProxyKeepsDomainCookiesServerSide(t *testing.T) {
 	resp.Header.Add("Set-Cookie", "wvsid=stolen; Path=/")
 	h.rewriteCookies(resp, info)
 
+	// Both reach the browser, and both are confined to the site that set them:
+	// the shared one so the site's own scripts can read it back, the host-only
+	// one as ever. Neither carries a Domain the gateway cannot honour.
 	got := resp.Header.Values("Set-Cookie")
-	if len(got) != 1 || !strings.HasPrefix(got[0], "prefs=dark") {
+	if len(got) != 2 {
 		t.Fatalf("browser cookies = %q", got)
 	}
-	if !strings.Contains(got[0], "Path=/p/https/sso.corp.example/ui") {
-		t.Errorf("path not rewritten: %q", got[0])
+	for _, sc := range got {
+		if strings.Contains(sc, "Domain=") {
+			t.Errorf("a Domain the gateway cannot honour survived: %q", sc)
+		}
+		if !strings.Contains(sc, "Path=/p/https/sso.corp.example/") {
+			t.Errorf("cookie not confined to the site that set it: %q", sc)
+		}
+	}
+	if !strings.Contains(got[0], "SSOSESSION=张三 令牌") || !strings.Contains(got[0], "HttpOnly") {
+		t.Errorf("the shared cookie was not passed to the browser intact: %q", got[0])
+	}
+	if !strings.Contains(got[1], "Path=/p/https/sso.corp.example/ui") {
+		t.Errorf("path not rewritten: %q", got[1])
 	}
 
 	// The application on another host in the same domain gets the shared one.
