@@ -25,6 +25,7 @@
 | `-config` | `webvpn-config.json` | 管理后台可写的策略文件 |
 | `-default-domain` / `-allow-user` / `-admin` | — | 策略文件不存在时的初始值 |
 | `-session-ttl` / `-code-ttl` | `1h` / `5m` | 会话与验证码有效期；会话有效期之后由后台接管 |
+| `-log-headers` | `false` | 排查用：记录发往上游的请求头与 `Set-Cookie`，见下文（明文记录凭据） |
 | `-ignore-email` | `false` | **把验证码打印到控制台**，不发邮件 |
 | `-smtp-addr` / `-smtp-user` / `-smtp-pass` / `-smtp-from` | — | SMTP 提交服务，作为管理后台未配置时的兜底；密码优先取环境变量 `WEBVPN_SMTP_PASS` |
 | `-smtp-tls-mode` | `auto` | `auto`（支持 STARTTLS 就升级）/ `require` / `none` / `implicit`（465 直接 TLS） |
@@ -145,6 +146,37 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr 127.0.0.1:8080 \
 
 需要留意的固有限制：仅按名字拦截时，用户可以用 IP 直连或换一个指向同一站点的域名绕开黑名单。
 要真正封住一个网段，请写 CIDR 规则。
+
+## 排查：`-log-headers`
+
+站点在网关下行为异常、又看不出所以然时，用它把**网关发往上游的请求**记下来，和浏览器直连时的
+请求逐条对比：
+
+```bash
+./webvpn -log-headers ...
+```
+
+每个被代理的请求会记三段：
+
+```
+upstream conn http://eiop.corp.com/uops/api/... -> 10.2.3.41:443 (reused=true)
+upstream POST http://eiop.corp.com/uops/api/tacking/addTackingInfo.do
+  Host: eiop.corp.com
+  Cookie: JSESSIONID=2BFC9FA4...
+  Origin: https://eiop.corp.com
+  Referer: https://eiop.corp.com/
+  (dropped) Connection: keep-alive
+origin 200 http://eiop.corp.com/uopsLogin/uopsLogin.do
+  (origin)  Set-Cookie: JSESSIONID=...; HttpOnly; Path=/
+  (browser) Set-Cookie: JSESSIONID=...; HttpOnly; Path=/
+```
+
+- `upstream conn` 是这次请求**实际连到的后端地址**。站点在 SLB 后面、会话又是节点本地的时候，
+  登录与后续请求落到不同节点就会表现为「Cookie 是对的，服务端说登录态过期」——看这一行能直接分辨。
+- `upstream` 段是发出去的请求头，`(dropped)` 是浏览器发了、网关没有转发的。
+- `origin` 段左边是源站下发的原始 `Set-Cookie`，右边是改写后给浏览器的，两相对照能看出作用域是否被改坏。
+
+**它会把会话 Cookie 与令牌明文写进日志**，查完就关掉。
 
 ## 会话与来源 IP
 
