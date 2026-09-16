@@ -2,7 +2,6 @@ package webvpn
 
 import (
 	"net/http"
-	"net/http/cookiejar"
 	"net/url"
 	"strconv"
 	"strings"
@@ -78,7 +77,9 @@ func (sc setCookie) attr(key string) (string, bool) {
 // rewrite re-scopes a cookie onto the gateway. path is the gateway path the
 // cookie should apply to, and secure reports whether the browser leg is TLS.
 func (sc setCookie) rewrite(path string, secure bool) string {
-	out := []string{sc.Pair}
+	// The value keeps its bytes; only the name moves into the gateway's space.
+	_, value, _ := strings.Cut(sc.Pair, "=")
+	out := []string{gatewayCookieName(sc.Name) + "=" + value}
 	for _, a := range sc.Attrs {
 		switch a.Key {
 		case "domain":
@@ -170,27 +171,6 @@ func (sc setCookie) domainScope(target *url.URL) (jar, browser bool) {
 	return false, false
 }
 
-// filterCookieHeader removes one named cookie from a Cookie header, leaving the
-// remaining pairs byte for byte.
-func filterCookieHeader(header, drop string) string {
-	if header == "" || drop == "" {
-		return header
-	}
-	var kept []string
-	for _, pair := range strings.Split(header, ";") {
-		trimmed := strings.TrimSpace(pair)
-		if trimmed == "" {
-			continue
-		}
-		name, _, _ := strings.Cut(trimmed, "=")
-		if strings.TrimSpace(name) == drop {
-			continue
-		}
-		kept = append(kept, trimmed)
-	}
-	return strings.Join(kept, "; ")
-}
-
 // cookieHeaderNames lists the cookie names already present in a Cookie header.
 func cookieHeaderNames(header string) map[string]bool {
 	names := map[string]bool{}
@@ -214,81 +194,54 @@ func appendCookiePairs(header string, pairs []string) string {
 	return header + "; " + strings.Join(pairs, "; ")
 }
 
-// resolveShadowedCookies settles a Cookie header that carries the same name
-// twice.
+// CookiePrefix names the space the gateway keeps its cookies in.
 //
-// A browser keeps one cookie per (name, domain, path), so a site that re-issues
-// its token simply replaces it. Behind the gateway the new one is written to the
-// gateway's own host or path, and a copy the browser already held at a wider
-// scope — set outside the tunnel, or by an older version of this gateway — sits
-// alongside it rather than being replaced. Both are then sent, oldest first
-// (RFC 6265 §5.4 orders equal paths by age), and a site that reads the first one
-// it finds reads the stale one: it answers that the session has expired while
-// the browser is holding a perfectly good token.
+// The gateway's own domain usually sits inside the domain of the sites it
+// proxies — an organisation has one registrable domain, and a gateway does not
+// get a second one. The browser then sends every cookie it holds for that wider
+// domain to the gateway's hosts as well: cookies from visits made outside the
+// tunnel, set by sites the current target has nothing to do with. Two things go
+// wrong. One of them carries the same name as a cookie the site just set, and
+// shadows it — a site reading the first of the two reads the stale one and says
+// the session has expired. And all of them are forwarded to whichever site is
+// being proxied, which is nobody's intent.
 //
-// The gateway knows which value the site last set, because it kept a copy, so
-// that is the one it forwards. With nothing to go on, the last is taken: at
-// equal paths that is the newer of the two.
-func resolveShadowedCookies(header string, current map[string]string) (string, []string) {
-	if header == "" {
-		return header, nil
-	}
-	pairs := strings.Split(header, ";")
-	count := map[string]int{}
-	for _, p := range pairs {
-		name, _, _ := strings.Cut(strings.TrimSpace(p), "=")
-		count[strings.TrimSpace(name)]++
-	}
+// A name can carry that distinction on its own, and nothing else can: the
+// browser tells the gateway names and values, never the scope a cookie was
+// stored at. So a cookie the gateway writes is given this prefix and has it
+// taken off again on the way back to the site, which never sees it. Anything
+// arriving without it was not put there by the gateway and is not forwarded.
+const CookiePrefix = "__wvpn_"
 
-	// keep[name] is the index of the pair to forward for a duplicated name, and
-	// matched says that index holds the value the gateway saw the site set.
-	keep := map[string]int{}
-	matched := map[string]bool{}
-	var shadowed []string
-	for i, p := range pairs {
-		name, value, _ := strings.Cut(strings.TrimSpace(p), "=")
-		name = strings.TrimSpace(name)
-		if count[name] < 2 {
-			continue
-		}
-		if _, seen := keep[name]; !seen {
-			shadowed = append(shadowed, name)
-		}
-		if matched[name] {
-			continue
-		}
-		if want, ok := current[name]; ok && value == want {
-			keep[name], matched[name] = i, true
-			continue
-		}
-		keep[name] = i // nothing better yet: the latest so far, so the last wins
-	}
-	if len(shadowed) == 0 {
-		return header, nil
-	}
+// gatewayCookieName is what a site's cookie is called inside the browser.
+func gatewayCookieName(name string) string { return CookiePrefix + name }
 
-	out := make([]string, 0, len(pairs))
-	for i, p := range pairs {
-		name, _, _ := strings.Cut(strings.TrimSpace(p), "=")
-		name = strings.TrimSpace(name)
-		if count[name] > 1 && keep[name] != i {
-			continue
-		}
-		out = append(out, strings.TrimSpace(p))
+// siteCookieName takes the prefix off, reporting whether it was there at all.
+func siteCookieName(name string) (string, bool) {
+	if !strings.HasPrefix(name, CookiePrefix) {
+		return name, false
 	}
-	return strings.Join(out, "; "), shadowed
+	return strings.TrimPrefix(name, CookiePrefix), true
 }
 
-// jarValues is what the gateway last saw the site set, by name.
-func jarValues(jar *cookiejar.Jar, target *url.URL) map[string]string {
-	if jar == nil {
-		return nil
+// ourCookies keeps the cookies the gateway itself wrote, under the names the
+// site knows them by. Everything else in the header reached the browser from
+// outside the tunnel and is none of this site's business.
+func ourCookies(header string) string {
+	if header == "" {
+		return header
 	}
-	u := *target
-	u.Scheme = httpScheme(target.Scheme)
-	out := map[string]string{}
-	for _, c := range jar.Cookies(&u) {
-		out[c.Name] = c.Value
+	var kept []string
+	for _, pair := range strings.Split(header, ";") {
+		name, value, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		if !ok {
+			continue
+		}
+		site, ours := siteCookieName(strings.TrimSpace(name))
+		if !ours {
+			continue
+		}
+		kept = append(kept, site+"="+value)
 	}
-	return out
+	return strings.Join(kept, "; ")
 }

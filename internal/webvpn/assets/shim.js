@@ -23,6 +23,10 @@
   // The gateway's own session cookie, which a proxied page must not touch.
   var SESSION = cfg.c || "";
   var COOKIE_URL = ASSETS + "cookie";
+  // The space the gateway keeps this site's cookies in, so that cookies the
+  // browser holds for the wider organisation domain — picked up outside the
+  // tunnel — neither shadow them nor show up as this site's own.
+  var COOKIE_PREFIX = cfg.k || "__wvpn_";
   // Mirror of the wrd path shape: /{scheme}[-{port}]/{hex}/...
   var WRD_PATH = /^\/(?:http|https|ws|wss)(?:-[0-9]{1,5})?\/[0-9a-f]+(?:\/|$)/i;
   var OPAQUE = /^(data|blob|javascript|mailto|tel|sms|about|magnet|ftp|file|chrome|chrome-extension|intent):/i;
@@ -447,12 +451,14 @@
   // domain-scoped one to the gateway. An empty string means: write nothing.
   function rewriteCookie(raw) {
     var parts = String(raw).split(";");
-    var name = parts[0].split("=")[0].trim();
+    var eq = parts[0].indexOf("=");
+    var name = (eq < 0 ? parts[0] : parts[0].slice(0, eq)).trim();
     if (name === "") return "";
     // A page must not be able to overwrite the gateway's own session.
     if (SESSION !== "" && name === SESSION) return "";
 
-    var out = [parts[0]];
+    // The value keeps its bytes; only the name moves into the gateway's space.
+    var out = [COOKIE_PREFIX + name + "=" + (eq < 0 ? "" : parts[0].slice(eq + 1))];
     var domain = "";
     var path = "/";
     var secure = false;
@@ -510,7 +516,15 @@
         configurable: true,
         enumerable: !!desc.enumerable,
         get: function () {
-          return desc.get.call(this);
+          // Only this site's own cookies, under the names it knows them by.
+          var raw = desc.get.call(this);
+          if (!raw) return raw;
+          var out = [];
+          raw.split(";").forEach(function (pair) {
+            var s = pair.trim();
+            if (s.indexOf(COOKIE_PREFIX) === 0) out.push(s.slice(COOKIE_PREFIX.length));
+          });
+          return out.join("; ");
         },
         set: function (raw) {
           var next = rewriteCookie(raw);
