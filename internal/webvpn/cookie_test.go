@@ -40,7 +40,10 @@ func TestRewriteSetCookie(t *testing.T) {
 	sc, _ := parseSetCookie("sid=张三 x; Path=/app; Domain=.corp.example; Secure; HttpOnly; SameSite=None; Max-Age=600")
 
 	overHTTP := sc.rewrite("/p/https/app.corp.example/app", false)
-	if !strings.HasPrefix(overHTTP, "sid=张三 x;") {
+	// The name moves into the gateway's own space, so a cookie the browser
+	// already holds for the wider domain cannot shadow it. The value keeps its
+	// bytes.
+	if !strings.HasPrefix(overHTTP, CookiePrefix+"sid=张三 x;") {
 		t.Errorf("payload changed: %q", overHTTP)
 	}
 	for _, want := range []string{"HttpOnly", "Max-Age=600", "SameSite=Lax", "Path=/p/https/app.corp.example/app"} {
@@ -80,25 +83,6 @@ func TestDomainScope(t *testing.T) {
 		if jar != tc.jar || browser != tc.browser {
 			t.Errorf("domainScope(%q) = %v/%v, want %v/%v", tc.raw, jar, browser, tc.jar, tc.browser)
 		}
-	}
-}
-
-func TestFilterCookieHeader(t *testing.T) {
-	header := "wvsid=secret; JSESSIONID=abc; user=张三 x; last=1"
-	got := filterCookieHeader(header, "wvsid")
-	if strings.Contains(got, "secret") {
-		t.Errorf("session cookie survived: %q", got)
-	}
-	for _, want := range []string{"JSESSIONID=abc", "user=张三 x", "last=1"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("lost %q from %q", want, got)
-		}
-	}
-	if names := cookieHeaderNames(got); !names["JSESSIONID"] || names["wvsid"] {
-		t.Errorf("cookieHeaderNames = %v", names)
-	}
-	if got := appendCookiePairs("", []string{"a=1", "b=2"}); got != "a=1; b=2" {
-		t.Errorf("appendCookiePairs on an empty header = %q", got)
 	}
 }
 
@@ -253,64 +237,48 @@ func TestPageWrittenDomainCookieReachesTheJar(t *testing.T) {
 	}
 }
 
-// A browser can hold two cookies of the same name at different scopes, and
-// sends both. The one the site last set is the one it means.
-func TestResolveShadowedCookies(t *testing.T) {
-	cases := []struct {
-		name, header string
-		current      map[string]string
-		want         string
-		shadowed     []string
-	}{{
-		name:   "nothing to settle",
-		header: "a=1; b=2",
-		want:   "a=1; b=2",
-	}, {
-		// The shape eiop produced: a stale copy from outside the tunnel sorts
-		// first, and a site reading the first one reads the stale one.
-		name:     "the value the site set wins, and keeps its place",
-		header:   "galaxy_token=STALE; JSESSIONID=abc; ip=x; galaxy_token=FRESH",
-		current:  map[string]string{"galaxy_token": "FRESH"},
-		want:     "JSESSIONID=abc; ip=x; galaxy_token=FRESH",
-		shadowed: []string{"galaxy_token"},
-	}, {
-		name:     "with nothing of our own, the newer of two equal paths is last",
-		header:   "tok=OLD; other=1; tok=NEW",
-		want:     "other=1; tok=NEW",
-		shadowed: []string{"tok"},
-	}, {
-		name:     "three copies collapse to one",
-		header:   "t=A; t=B; t=C",
-		current:  map[string]string{"t": "B"},
-		want:     "t=B",
-		shadowed: []string{"t"},
-	}, {
-		name:     "a value the gateway does not know still collapses",
-		header:   "t=A; t=B",
-		current:  map[string]string{"t": "Z"},
-		want:     "t=B",
-		shadowed: []string{"t"},
-	}, {
-		name:     "bytes are carried over untouched",
-		header:   "u=张三 与 空格; u=张三 新的",
-		current:  map[string]string{"u": "张三 新的"},
-		want:     "u=张三 新的",
-		shadowed: []string{"u"},
-	}, {
-		name:   "an empty header is left alone",
-		header: "",
-		want:   "",
-	}}
+// The gateway's hosts sit inside the organisation's domain, so the browser
+// offers them every cookie it holds for that domain — cookies from visits made
+// outside the tunnel, belonging to other systems. A name is the only thing that
+// can tell the gateway's own apart, because the browser never says what scope a
+// cookie came from.
+func TestCookieNamespace(t *testing.T) {
+	sc, _ := parseSetCookie("galaxy_token=9d0b9e25; Domain=corp.example; Path=/; Max-Age=43200")
+	written := sc.rewrite("/", true)
+	if !strings.HasPrefix(written, CookiePrefix+"galaxy_token=9d0b9e25") {
+		t.Fatalf("the cookie was not written into the gateway's space: %q", written)
+	}
 
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got, shadowed := resolveShadowedCookies(tc.header, tc.current)
-			if got != tc.want {
-				t.Errorf("header = %q, want %q", got, tc.want)
-			}
-			if strings.Join(shadowed, ",") != strings.Join(tc.shadowed, ",") {
-				t.Errorf("shadowed = %v, want %v", shadowed, tc.shadowed)
-			}
-		})
+	// What the browser then sends back: the gateway's own, one left over from a
+	// visit outside the tunnel under the same name, one belonging to another
+	// system, and the gateway's session.
+	header := CookiePrefix + "galaxy_token=9d0b9e25; galaxy_token=STALE; other_system=secret; wvsid=session"
+	got := ourCookies(header)
+	if got != "galaxy_token=9d0b9e25" {
+		t.Errorf("forwarded %q, want only the site's own cookie under its own name", got)
+	}
+
+	// And the shape that caused the fault: a site reading the first cookie of a
+	// name now finds only one.
+	if strings.Count(got, "galaxy_token=") != 1 {
+		t.Errorf("a name still arrives twice: %q", got)
+	}
+	for _, gone := range []string{"STALE", "secret", "session", CookiePrefix} {
+		if strings.Contains(got, gone) {
+			t.Errorf("%q should not have reached the site: %q", gone, got)
+		}
+	}
+
+	// Values keep their bytes, names round-trip.
+	sc, _ = parseSetCookie("user=张三 与 空格; Path=/")
+	written = sc.rewrite("/p/https/app.corp.example/", false)
+	if !strings.Contains(written, CookiePrefix+"user=张三 与 空格") {
+		t.Errorf("value was mangled on the way out: %q", written)
+	}
+	if got := ourCookies(CookiePrefix + "user=张三 与 空格"); got != "user=张三 与 空格" {
+		t.Errorf("value was mangled on the way back: %q", got)
+	}
+	if got := ourCookies(""); got != "" {
+		t.Errorf("an empty header became %q", got)
 	}
 }

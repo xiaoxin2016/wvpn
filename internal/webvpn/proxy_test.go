@@ -183,7 +183,9 @@ func TestProxyTranslatesRefererAndStripsSessionCookie(t *testing.T) {
 	_, body := get(t, client, gw.URL+"/p/http/"+host+"/echo", map[string]string{
 		"Referer": gw.URL + "/p/http/" + host + "/page1",
 		"Origin":  gw.URL,
-		"Cookie":  "wvsid=secret; app=keepme",
+		// What the gateway wrote for this site, the gateway's own session, and
+		// something the browser picked up outside the tunnel.
+		"Cookie": CookiePrefix + "app=keepme; wvsid=secret; sso_token=fromelsewhere",
 	})
 
 	if !strings.Contains(body, "referer=http://"+host+"/page1") {
@@ -196,7 +198,13 @@ func TestProxyTranslatesRefererAndStripsSessionCookie(t *testing.T) {
 		t.Errorf("gateway session cookie leaked upstream:\n%s", body)
 	}
 	if !strings.Contains(body, "app=keepme") {
-		t.Errorf("origin cookie was dropped:\n%s", body)
+		t.Errorf("the site's own cookie was dropped:\n%s", body)
+	}
+	if strings.Contains(body, CookiePrefix) {
+		t.Errorf("the gateway's own name for a cookie reached the site:\n%s", body)
+	}
+	if strings.Contains(body, "fromelsewhere") {
+		t.Errorf("a cookie from outside the tunnel was forwarded:\n%s", body)
 	}
 	if !strings.Contains(body, "accept-encoding=gzip") {
 		t.Errorf("upstream Accept-Encoding was not normalised:\n%s", body)
