@@ -554,8 +554,18 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 		// The gateway's own session cookie must not reach the origin.
 		header = filterCookieHeader(header, name)
 	}
-	if jar := h.jars.lookup(info.jarKey); jar != nil {
+	jar := h.jars.lookup(info.jarKey)
+	if jar != nil {
 		header = appendCookiePairs(header, jarPairs(jar, target, cookieHeaderNames(header)))
+	}
+	// A name the browser holds twice is a cookie the site replaced and the
+	// browser kept both of, because the gateway had to narrow the new one's
+	// scope. Forward the one the site actually set.
+	if cleaned, shadowed := resolveShadowedCookies(header, jarValues(jar, target)); len(shadowed) > 0 {
+		h.log.Printf("cookie %s arrived more than once for %s; forwarded the value the site last set "+
+			"(a copy from outside the tunnel is shadowing it — see docs/compatibility.md)",
+			strings.Join(shadowed, ", "), target.Host)
+		header = cleaned
 	}
 	if header == "" {
 		pr.Out.Header.Del("Cookie")
