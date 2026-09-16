@@ -252,3 +252,65 @@ func TestPageWrittenDomainCookieReachesTheJar(t *testing.T) {
 		}
 	}
 }
+
+// A browser can hold two cookies of the same name at different scopes, and
+// sends both. The one the site last set is the one it means.
+func TestResolveShadowedCookies(t *testing.T) {
+	cases := []struct {
+		name, header string
+		current      map[string]string
+		want         string
+		shadowed     []string
+	}{{
+		name:   "nothing to settle",
+		header: "a=1; b=2",
+		want:   "a=1; b=2",
+	}, {
+		// The shape eiop produced: a stale copy from outside the tunnel sorts
+		// first, and a site reading the first one reads the stale one.
+		name:     "the value the site set wins, and keeps its place",
+		header:   "galaxy_token=STALE; JSESSIONID=abc; ip=x; galaxy_token=FRESH",
+		current:  map[string]string{"galaxy_token": "FRESH"},
+		want:     "JSESSIONID=abc; ip=x; galaxy_token=FRESH",
+		shadowed: []string{"galaxy_token"},
+	}, {
+		name:     "with nothing of our own, the newer of two equal paths is last",
+		header:   "tok=OLD; other=1; tok=NEW",
+		want:     "other=1; tok=NEW",
+		shadowed: []string{"tok"},
+	}, {
+		name:     "three copies collapse to one",
+		header:   "t=A; t=B; t=C",
+		current:  map[string]string{"t": "B"},
+		want:     "t=B",
+		shadowed: []string{"t"},
+	}, {
+		name:     "a value the gateway does not know still collapses",
+		header:   "t=A; t=B",
+		current:  map[string]string{"t": "Z"},
+		want:     "t=B",
+		shadowed: []string{"t"},
+	}, {
+		name:     "bytes are carried over untouched",
+		header:   "u=张三 与 空格; u=张三 新的",
+		current:  map[string]string{"u": "张三 新的"},
+		want:     "u=张三 新的",
+		shadowed: []string{"u"},
+	}, {
+		name:   "an empty header is left alone",
+		header: "",
+		want:   "",
+	}}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, shadowed := resolveShadowedCookies(tc.header, tc.current)
+			if got != tc.want {
+				t.Errorf("header = %q, want %q", got, tc.want)
+			}
+			if strings.Join(shadowed, ",") != strings.Join(tc.shadowed, ",") {
+				t.Errorf("shadowed = %v, want %v", shadowed, tc.shadowed)
+			}
+		})
+	}
+}

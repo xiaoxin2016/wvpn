@@ -2,6 +2,7 @@ package webvpn
 
 import (
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strconv"
 	"strings"
@@ -211,4 +212,83 @@ func appendCookiePairs(header string, pairs []string) string {
 		return strings.Join(pairs, "; ")
 	}
 	return header + "; " + strings.Join(pairs, "; ")
+}
+
+// resolveShadowedCookies settles a Cookie header that carries the same name
+// twice.
+//
+// A browser keeps one cookie per (name, domain, path), so a site that re-issues
+// its token simply replaces it. Behind the gateway the new one is written to the
+// gateway's own host or path, and a copy the browser already held at a wider
+// scope — set outside the tunnel, or by an older version of this gateway — sits
+// alongside it rather than being replaced. Both are then sent, oldest first
+// (RFC 6265 §5.4 orders equal paths by age), and a site that reads the first one
+// it finds reads the stale one: it answers that the session has expired while
+// the browser is holding a perfectly good token.
+//
+// The gateway knows which value the site last set, because it kept a copy, so
+// that is the one it forwards. With nothing to go on, the last is taken: at
+// equal paths that is the newer of the two.
+func resolveShadowedCookies(header string, current map[string]string) (string, []string) {
+	if header == "" {
+		return header, nil
+	}
+	pairs := strings.Split(header, ";")
+	count := map[string]int{}
+	for _, p := range pairs {
+		name, _, _ := strings.Cut(strings.TrimSpace(p), "=")
+		count[strings.TrimSpace(name)]++
+	}
+
+	// keep[name] is the index of the pair to forward for a duplicated name, and
+	// matched says that index holds the value the gateway saw the site set.
+	keep := map[string]int{}
+	matched := map[string]bool{}
+	var shadowed []string
+	for i, p := range pairs {
+		name, value, _ := strings.Cut(strings.TrimSpace(p), "=")
+		name = strings.TrimSpace(name)
+		if count[name] < 2 {
+			continue
+		}
+		if _, seen := keep[name]; !seen {
+			shadowed = append(shadowed, name)
+		}
+		if matched[name] {
+			continue
+		}
+		if want, ok := current[name]; ok && value == want {
+			keep[name], matched[name] = i, true
+			continue
+		}
+		keep[name] = i // nothing better yet: the latest so far, so the last wins
+	}
+	if len(shadowed) == 0 {
+		return header, nil
+	}
+
+	out := make([]string, 0, len(pairs))
+	for i, p := range pairs {
+		name, _, _ := strings.Cut(strings.TrimSpace(p), "=")
+		name = strings.TrimSpace(name)
+		if count[name] > 1 && keep[name] != i {
+			continue
+		}
+		out = append(out, strings.TrimSpace(p))
+	}
+	return strings.Join(out, "; "), shadowed
+}
+
+// jarValues is what the gateway last saw the site set, by name.
+func jarValues(jar *cookiejar.Jar, target *url.URL) map[string]string {
+	if jar == nil {
+		return nil
+	}
+	u := *target
+	u.Scheme = httpScheme(target.Scheme)
+	out := map[string]string{}
+	for _, c := range jar.Cookies(&u) {
+		out[c.Name] = c.Value
+	}
+	return out
 }
