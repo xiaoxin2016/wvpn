@@ -117,6 +117,10 @@ type reqInfo struct {
 	browserHost string
 	// clientIP is where the browser is, for the targets that are told.
 	clientIP string
+	// omitCookies marks a request the page sent with credentials: "omit". The
+	// browser carried the gateway's session anyway, so the gateway could tell
+	// who is asking; the site is to see no cookies, as the page intended.
+	omitCookies bool
 }
 
 func withInfo(ctx context.Context, info *reqInfo) context.Context {
@@ -135,6 +139,17 @@ func siteCheckFrom(ctx context.Context) SiteCheck {
 	}
 	return SiteCheck{}
 }
+
+// OmitCredentialsHeader marks a request the page sent with credentials: "omit".
+//
+// A site that authenticates with a token of its own often sends its API calls
+// without cookies. Behind the gateway that also leaves out the gateway's own
+// session cookie, and the call is turned away before it reaches the site. The
+// injected script therefore sends such a call with cookies after all and sets
+// this header; the gateway checks its session, then withholds every cookie
+// from the site in both directions, which is what "omit" asked for. The name
+// is repeated in assets/shim.js.
+const OmitCredentialsHeader = "X-Wvpn-Credentials"
 
 const (
 	shimPath    = "/_wv/shim.js"
@@ -498,6 +513,7 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 		site:        check,
 		jarKey:      h.sessionKey(r),
 		browserHost: r.Host,
+		omitCookies: strings.EqualFold(r.Header.Get(OmitCredentialsHeader), "omit"),
 	}
 	if h.opts.ForwardFor != nil && h.opts.ForwardFor() && h.opts.ClientIP != nil {
 		info.clientIP = h.opts.ClientIP(r)
@@ -555,9 +571,16 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 	// browser from outside the tunnel — the gateway's hosts sit inside the
 	// organisation's domain, so the browser offers it everything it holds for
 	// that domain — and none of it belongs to this site.
-	header := ourCookies(pr.Out.Header.Get("Cookie"))
-	if jar := h.jars.lookup(info.jarKey); jar != nil {
-		header = appendCookiePairs(header, jarPairs(jar, target, cookieHeaderNames(header)))
+	//
+	// A request the page sent without credentials gets none of them: the
+	// cookies only came along so the gateway could check its own session.
+	pr.Out.Header.Del(OmitCredentialsHeader)
+	header := ""
+	if !info.omitCookies {
+		header = ourCookies(pr.Out.Header.Get("Cookie"))
+		if jar := h.jars.lookup(info.jarKey); jar != nil {
+			header = appendCookiePairs(header, jarPairs(jar, target, cookieHeaderNames(header)))
+		}
 	}
 	if header == "" {
 		pr.Out.Header.Del("Cookie")
@@ -760,6 +783,13 @@ func (h *Handler) rewriteCookies(resp *http.Response, info *reqInfo) {
 		return
 	}
 	resp.Header.Del("Set-Cookie")
+	if info.omitCookies {
+		// A browser ignores the cookies a credential-less response sets, and
+		// this response only reaches the browser as a credentialed one because
+		// the gateway asked for that. Neither the browser nor the jar keeps
+		// them.
+		return
+	}
 
 	var shared []*http.Cookie
 	for _, raw := range raws {

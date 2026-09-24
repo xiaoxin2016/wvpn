@@ -125,6 +125,38 @@ uopsAuthMap: { accessToken: "474ca9…", domain: "corp.example", cookieTime: 432
   这正是 `userCenter` 指向同域另一台主机时仍能认这个令牌的原因。网关只接受目标自身能设置的域，
   且拒绝任何试图覆盖网关会话 Cookie 的写入。
 
+### 不带 Cookie 的接口请求（`credentials: "omit"`）
+
+不少单页应用登录后拿到的是**令牌**，存在前端、放进请求头发送，接口调用时干脆声明不带 Cookie：
+
+```js
+fetch("/dbocDirp/getAuthorInfo.json", { method: "POST", credentials: "omit",
+  headers: { Authorization: "Bearer …" }, body })
+```
+
+直接访问没有任何问题。经过网关就不行了：网关认人靠的是它自己的会话 Cookie `wvsid`，
+`omit` 连这个也去掉了，请求在网关的登录校验这一层就被拦下，返回
+`401 {"ok":false,"error":"unauthenticated"}`——**根本到不了源站**，所以开了 `-log-headers`
+也看不到这些接口。表现是页面能打开、静态资源都正常，只有接口全部 401。
+
+注入脚本因此接管这类请求：发往本页同源（即网关自身）的 `omit` 请求改为带 Cookie 发出，
+并加上标记头 `X-Wvpn-Credentials: omit`。网关见到标记，照常用 `wvsid` 做登录校验，然后
+**把 `omit` 的本意还给源站**：
+
+- 不转发任何 Cookie——浏览器里存的本站 Cookie、域级 Cookie 罐里的都不带；
+- 响应里的 `Set-Cookie` 既不交给浏览器，也不进 Cookie 罐（`omit` 的响应本来就不会被存）；
+- 标记头本身在转发前删掉，源站看不到。
+
+所以源站收到的请求与直接访问时一致：只有令牌，没有 Cookie。`-log-headers` 下这类请求的
+`Cookie` 与 `X-Wvpn-Credentials` 都会显示在 `(dropped)` 行里。
+
+尚未覆盖的情形：
+
+- **子域名模式下跨目标的 `omit` 请求**（页面在 A 站点、请求发往 B 站点的网关子域）：跨源请求
+  带凭据需要 CORS 预检与 `Access-Control-Allow-Credentials` 配合，与同源情形不是一回事，暂不改写；
+- `mode: "no-cors"` 的请求无法携带自定义头，按原样发出；
+- `XMLHttpRequest` 同源时总会带 Cookie，不受 `withCredentials` 影响，本来就没有这个问题。
+
 ### location.origin 拼出来的地址
 
 页面脚本极常见的一种写法：`fetch(location.origin + '/api/profile')`。在**路径模式**与**加密路径模式**下，

@@ -185,6 +185,36 @@
 
   // ---- network APIs --------------------------------------------------------
 
+  // A site that authenticates with a token of its own often sends its API
+  // calls with credentials: "omit". Behind the gateway that also leaves out the
+  // gateway's own session cookie, and the call is turned away before it
+  // reaches the site. So a same-origin call is sent with cookies after all,
+  // marked, and the gateway withholds every cookie from the site in both
+  // directions once it has checked its session. Mirror of
+  // webvpn.OmitCredentialsHeader.
+  var OMIT_HEADER = "X-Wvpn-Credentials";
+
+  function omitsCredentials(input, init) {
+    if (init && init.credentials !== undefined) return init.credentials === "omit";
+    return typeof Request !== "undefined" && input instanceof Request && input.credentials === "omit";
+  }
+
+  // withSession marks a same-origin request and lets it carry the cookies.
+  function withSession(req) {
+    // A no-cors request cannot carry the marker, and one to another origin
+    // does not carry this origin's session: both go as the page wrote them.
+    if (req.mode === "no-cors" || new URL(req.url, location.href).origin !== location.origin) return req;
+    var headers = new Headers(req.headers);
+    headers.set(OMIT_HEADER, "omit");
+    return new Request(req, {
+      credentials: "same-origin",
+      headers: headers,
+      // Any init resets these to the defaults; keep what the page chose.
+      referrer: req.referrer,
+      referrerPolicy: req.referrerPolicy
+    });
+  }
+
   patch(window, "fetch", function (orig) {
     return function (input, init) {
       try {
@@ -195,6 +225,20 @@
           input = rewrite(input);
         }
       } catch (e) {}
+      if (typeof Request !== "undefined" && omitsCredentials(input, init)) {
+        var req = null;
+        try {
+          req = new Request(input, init);
+        } catch (e) {}
+        // Once built, this is what gets sent, changed or not: building it
+        // may have taken the body out of the page's own Request.
+        if (req) {
+          try {
+            req = withSession(req);
+          } catch (e) {}
+          return orig.call(this, req);
+        }
+      }
       return orig.call(this, input, init);
     };
   });

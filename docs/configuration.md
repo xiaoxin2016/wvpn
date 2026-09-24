@@ -176,6 +176,11 @@ origin 200 http://eiop.corp.com/uopsLogin/uopsLogin.do
 - `upstream` 段是发出去的请求头，`(dropped)` 是浏览器发了、网关没有转发的。
 - `origin` 段左边是源站下发的原始 `Set-Cookie`，右边是改写后给浏览器的，两相对照能看出作用域是否被改坏。
 
+**日志里完全看不到的请求**说明它在转发之前就被网关拒绝了——最常见的是请求没带网关会话 Cookie，
+网关直接回 `401 {"ok":false,"error":"unauthenticated"}`，这一步不写日志。到浏览器开发者工具里看
+这个请求的响应体与请求头（有没有 `Cookie: wvsid=…`）即可确认；前端用 `credentials: "omit"` 发请求
+就会这样，见[站点兼容性](compatibility.md#不带-cookie-的接口请求credentials-omit)。
+
 **它会把会话 Cookie 与令牌明文写进日志**，查完就关掉。
 
 ## 会话与来源 IP
