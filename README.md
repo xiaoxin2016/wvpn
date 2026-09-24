@@ -107,7 +107,7 @@ server {
 | --- | --- |
 | [配置](docs/configuration.md) | 命令行参数、初始化、邮件发送、访问策略、登录与权限 |
 | [URL 模式](docs/url-modes.md) | 路径 / 加密路径 / 子域名三种形态，泛域名与前置代理 |
-| [站点兼容性](docs/compatibility.md) | Cookie 与单点登录、回跳地址还原、运行期改写、自签名证书 |
+| [站点兼容性](docs/compatibility.md) | Cookie 与单点登录、不带 Cookie 的接口请求、回跳地址还原、运行期改写、自签名证书 |
 | [安全须知](docs/security.md) | 部署前请读完 |
 | [实现与开发](docs/internals.md) | 代码结构、构建发布、测试 |
 
