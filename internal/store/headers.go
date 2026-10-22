@@ -34,9 +34,14 @@ const (
 
 // reservedHeaders are the ones the gateway itself decides, or that describe the
 // connection rather than the request. Letting the console set them would break
-// the proxy (Host, Content-Length), undo its rewriting (Origin, Referer),
-// bypass a switch that exists for them (X-Forwarded-For), or hand a site the
-// gateway's own business (Cookie, the omit marker).
+// the proxy (Host, Content-Length), undo its rewriting (Origin, Referer, and
+// X-Forwarded-Host and -Proto, which would have a site build addresses the
+// gateway then maps to the wrong target), or hand a site the gateway's own
+// business (Cookie, the omit marker).
+//
+// X-Forwarded-For is not among them: with the address switch off it is the
+// operator's to set, and with it on the proxy gives the real address
+// precedence.
 var reservedHeaders = map[string]string{
 	"Host":                "目标地址决定",
 	"Cookie":              "网关按站点管理 Cookie",
@@ -52,7 +57,6 @@ var reservedHeaders = map[string]string{
 	"Te":                  "这是连接级的头",
 	"Trailer":             "这是连接级的头",
 	"Upgrade":             "这是连接级的头",
-	"X-Forwarded-For":     "请用「会话与来源 IP」里的开关",
 	"X-Forwarded-Host":    "网关不会向源站透露自己的地址",
 	"X-Forwarded-Proto":   "网关不会向源站透露自己的地址",
 	"X-Wvpn-Credentials":  "网关内部使用",

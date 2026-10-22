@@ -87,7 +87,7 @@ func TestHeaderRulesAreValidated(t *testing.T) {
 		// The gateway's own business, in any letter case.
 		{HeaderRule{Site: "test.corp.com", Name: "host", Value: "evil.example"}, "Host 不能在这里设置"},
 		{HeaderRule{Site: "test.corp.com", Name: "COOKIE", Value: "a=b"}, "Cookie 不能在这里设置"},
-		{HeaderRule{Site: "test.corp.com", Name: "x-forwarded-for", Value: "1.2.3.4"}, "会话与来源 IP"},
+		{HeaderRule{Site: "test.corp.com", Name: "x-forwarded-host", Value: "evil.example"}, "不能在这里设置"},
 		{HeaderRule{Site: "test.corp.com", Name: "Transfer-Encoding", Value: "chunked"}, "不能在这里设置"},
 		{HeaderRule{Site: "test.corp.com", Name: "X-Wvpn-Credentials", Value: "omit"}, "不能在这里设置"},
 	}
@@ -105,16 +105,20 @@ func TestHeaderRulesAreValidated(t *testing.T) {
 
 	// A tab is a legal character inside a value, and surrounding space is not
 	// part of it. Rows the editor left entirely blank are dropped, not refused.
+	// X-Forwarded-For is the operator's to set; the proxy decides when it
+	// applies.
 	cfg := s.Get()
 	cfg.Headers = []HeaderRule{
 		{Site: " Test.Corp.com ", Name: " test-env ", Value: "  a\tb  "},
 		{},
+		{Site: "test.corp.com", Name: "X-Forwarded-For", Value: "10.0.0.1"},
 	}
 	if err := s.Set(cfg); err != nil {
 		t.Fatalf("a valid rule was refused: %v", err)
 	}
 	stored := s.Get().Headers
-	if len(stored) != 1 || stored[0] != (HeaderRule{Site: "test.corp.com", Name: "test-env", Value: "a\tb"}) {
+	if len(stored) != 2 || stored[0] != (HeaderRule{Site: "test.corp.com", Name: "test-env", Value: "a\tb"}) ||
+		stored[1].Name != "X-Forwarded-For" {
 		t.Errorf("stored %+v", stored)
 	}
 }

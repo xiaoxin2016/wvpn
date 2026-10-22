@@ -513,3 +513,58 @@ func TestExtraHeadersAreSetForTheirSite(t *testing.T) {
 		t.Errorf("X-Via = %q, want the later rule's value alone", got)
 	}
 }
+
+// With the address switch off nothing about the browser's whereabouts reaches
+// the site — not X-Forwarded-For, and not the X-Real-IP a proxy in front of the
+// gateway wrote — unless the operator sets a value for the site deliberately.
+// With it on, the real address wins over any configured one.
+func TestForwardedForSwitchAndConfiguredValue(t *testing.T) {
+	var seen http.Header
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Clone()
+		io.WriteString(w, "ok")
+	}))
+	t.Cleanup(origin.Close)
+	host := originHost(t, origin)
+
+	forward := false
+	var rules []Header
+	gw, client := gatewayFor(t, Options{
+		ForwardFor:   func() bool { return forward },
+		ClientIP:     func(*http.Request) string { return "10.1.2.3" },
+		ExtraHeaders: func(*url.URL) []Header { return rules },
+	})
+	fromFront := map[string]string{"X-Real-IP": "172.24.2.153", "X-Forwarded-For": "203.0.113.9"}
+	call := func() {
+		t.Helper()
+		if resp, _ := get(t, client, gw.URL+"/p/http/"+host+"/", fromFront); resp.StatusCode != http.StatusOK {
+			t.Fatalf("status %d", resp.StatusCode)
+		}
+	}
+
+	// Off, no rule: neither header reaches the site.
+	call()
+	if v := seen.Values("X-Forwarded-For"); len(v) != 0 {
+		t.Errorf("off: X-Forwarded-For = %q, want none", v)
+	}
+	if v := seen.Values("X-Real-Ip"); len(v) != 0 {
+		t.Errorf("off: X-Real-IP = %q, want none", v)
+	}
+
+	// Off, with rules: the operator's values go out, exactly.
+	rules = []Header{{Name: "X-Forwarded-For", Value: "10.0.0.1"}, {Name: "X-Real-IP", Value: "10.0.0.1"}}
+	call()
+	if v := seen.Values("X-Forwarded-For"); len(v) != 1 || v[0] != "10.0.0.1" {
+		t.Errorf("off with a rule: X-Forwarded-For = %q, want the configured value alone", v)
+	}
+	if v := seen.Values("X-Real-Ip"); len(v) != 1 || v[0] != "10.0.0.1" {
+		t.Errorf("off with a rule: X-Real-IP = %q, want the configured value", v)
+	}
+
+	// On: the address the gateway settled on wins over the configured one.
+	forward = true
+	call()
+	if v := seen.Values("X-Forwarded-For"); len(v) != 1 || v[0] != "10.1.2.3" {
+		t.Errorf("on with a rule: X-Forwarded-For = %q, want the browser's address", v)
+	}
+}
