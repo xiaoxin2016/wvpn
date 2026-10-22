@@ -1031,3 +1031,57 @@ func TestRenewExtendsTheSessionAndItsCookie(t *testing.T) {
 		t.Errorf("renewing an expired session gave %d, want 401", resp.StatusCode)
 	}
 }
+
+func TestAdminEditsRequestHeaders(t *testing.T) {
+	m, mailer := newManager(t, store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+	})
+	srv, client := newServer(t, m)
+	signIn(t, client, srv, mailer, "root")
+
+	base := store.Config{
+		DefaultDomain: "test.com",
+		AllowedUsers:  []string{"*@test.com"},
+		Admins:        []string{"root@test.com"},
+	}
+	cfg := base
+	cfg.Headers = []store.HeaderRule{{Site: "test.corp.com", Name: "test-env", Value: "dev"}}
+	status, out := postJSON(t, client, srv.URL+"/admin/api/config", cfg)
+	if status != http.StatusOK || out["ok"] != true {
+		t.Fatalf("saving a header rule: %d %v", status, out)
+	}
+	if got := m.store.HeadersFor("test.corp.com"); len(got) != 1 || got[0].Name != "test-env" || got[0].Value != "dev" {
+		t.Fatalf("stored rules: %+v", got)
+	}
+	// The rules come back to the console as saved.
+	resp, err := client.Get(srv.URL + "/admin/api/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var view struct {
+		Config struct {
+			Headers []store.HeaderRule `json:"headers"`
+		} `json:"config"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&view); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(view.Config.Headers) != 1 || view.Config.Headers[0].Site != "test.corp.com" {
+		t.Errorf("console view: %+v", view.Config.Headers)
+	}
+
+	// A header the gateway manages itself is refused with a reason, and the
+	// stored rules are left as they were.
+	cfg = base
+	cfg.Headers = []store.HeaderRule{{Site: "test.corp.com", Name: "Cookie", Value: "a=b"}}
+	status, out = postJSON(t, client, srv.URL+"/admin/api/config", cfg)
+	if status != http.StatusBadRequest || !strings.Contains(fmt.Sprint(out["error"]), "Cookie") {
+		t.Errorf("a reserved header was accepted: %d %v", status, out)
+	}
+	if got := m.store.HeadersFor("test.corp.com"); len(got) != 1 {
+		t.Errorf("a refused save changed the rules: %+v", got)
+	}
+}

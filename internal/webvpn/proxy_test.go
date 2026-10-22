@@ -472,3 +472,44 @@ func TestForwardedForIsTheOperatorsChoice(t *testing.T) {
 		t.Errorf("a claimed chain was passed through:\n%s", body)
 	}
 }
+
+// Headers the operator attached to a site reach that site, replacing what the
+// browser sent under the same name, and no other site sees them.
+func TestExtraHeadersAreSetForTheirSite(t *testing.T) {
+	var seen http.Header
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Clone()
+		io.WriteString(w, "ok")
+	}))
+	t.Cleanup(origin.Close)
+	host := originHost(t, origin)
+
+	var askedFor string
+	gw, client := gatewayFor(t, Options{
+		ExtraHeaders: func(target *url.URL) []Header {
+			askedFor = target.Host
+			if target.Host != host {
+				return nil
+			}
+			return []Header{
+				{Name: "test-env", Value: "dev"},
+				{Name: "X-Via", Value: "first"},
+				{Name: "X-Via", Value: "second"}, // later wins
+			}
+		},
+	})
+
+	resp, _ := get(t, client, gw.URL+"/p/http/"+host+"/api", map[string]string{"Test-Env": "prod"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if askedFor != host {
+		t.Errorf("headers were looked up for %q, want the target %q", askedFor, host)
+	}
+	if got := seen.Values("Test-Env"); len(got) != 1 || got[0] != "dev" {
+		t.Errorf("Test-Env = %q, want only the configured value, not the browser's", got)
+	}
+	if got := seen.Values("X-Via"); len(got) != 1 || got[0] != "second" {
+		t.Errorf("X-Via = %q, want the later rule's value alone", got)
+	}
+}

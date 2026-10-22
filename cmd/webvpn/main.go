@@ -215,7 +215,17 @@ func run(c config, logger *log.Logger) error {
 		},
 		ForceSecure: cfg.PublicHTTPS,
 		ForwardFor:  cfg.ForwardsFor,
-		LogHeaders:  c.logHeaders,
+		// Read per request, so a header added in the console applies to the
+		// next request without a restart.
+		ExtraHeaders: func(target *url.URL) []webvpn.Header {
+			rules := cfg.HeadersFor(target.Host)
+			out := make([]webvpn.Header, 0, len(rules))
+			for _, r := range rules {
+				out = append(out, webvpn.Header{Name: r.Name, Value: r.Value})
+			}
+			return out
+		},
+		LogHeaders: c.logHeaders,
 		Portal: webvpn.Portal{
 			Name:      c.portal,
 			Bookmarks: func() []webvpn.Category { return categories(cfg) },

@@ -73,6 +73,12 @@ type Options struct {
 	// is what makes single sign-on work. Nil restores for every target.
 	RestoreFor func(target *url.URL) bool
 
+	// ExtraHeaders returns request headers to add for a target, in order; a
+	// later one with the same name wins. The caller vouches for them: names
+	// the gateway manages itself (Host, Cookie, hop-by-hop headers) and values
+	// carrying line breaks must already have been refused. Nil adds nothing.
+	ExtraHeaders func(target *url.URL) []Header
+
 	// SessionCookie names the gateway's own session cookie, which must never
 	// be forwarded to a proxied origin.
 	SessionCookie string
@@ -81,6 +87,11 @@ type Options struct {
 	Portal Portal
 
 	Logger *log.Logger
+}
+
+// Header is one request header to send a site.
+type Header struct {
+	Name, Value string
 }
 
 // Handler is the gateway: landing page, client shim, and proxied traffic.
@@ -632,6 +643,15 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 		pr.Out.Header.Set("X-Forwarded-For", info.clientIP)
 	} else {
 		pr.Out.Header.Del("X-Forwarded-For")
+	}
+
+	// Headers the operator attached to this site come last, and replace what
+	// the browser sent under the same name: a header set on the way in is not
+	// one a user can override from the other side.
+	if h.opts.ExtraHeaders != nil {
+		for _, hd := range h.opts.ExtraHeaders(target) {
+			pr.Out.Header.Set(hd.Name, hd.Value)
+		}
 	}
 }
 

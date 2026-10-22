@@ -852,16 +852,17 @@ func (m *Manager) requireAdminAPI(next http.HandlerFunc) http.HandlerFunc {
 // store.Config: the SMTP password goes in through this struct but never comes
 // back out of it.
 type adminConfig struct {
-	DefaultDomain string        `json:"default_domain"`
-	AllowedUsers  []string      `json:"allowed_users"`
-	Admins        []string      `json:"admins"`
-	Access        store.Access  `json:"access"`
-	Bookmarks     []store.Group `json:"bookmarks"`
-	SMTP          adminSMTP     `json:"smtp"`
-	Gateway       store.Gateway `json:"gateway"`
-	TLS           adminTLS      `json:"tls"`
-	SSO           store.SSO     `json:"sso"`
-	Policy        store.Policy  `json:"policy"`
+	DefaultDomain string             `json:"default_domain"`
+	AllowedUsers  []string           `json:"allowed_users"`
+	Admins        []string           `json:"admins"`
+	Access        store.Access       `json:"access"`
+	Bookmarks     []store.Group      `json:"bookmarks"`
+	SMTP          adminSMTP          `json:"smtp"`
+	Gateway       store.Gateway      `json:"gateway"`
+	TLS           adminTLS           `json:"tls"`
+	SSO           store.SSO          `json:"sso"`
+	Headers       []store.HeaderRule `json:"headers"`
+	Policy        store.Policy       `json:"policy"`
 }
 
 // adminTLS carries the gateway's certificate. The certificate itself is public
@@ -908,6 +909,7 @@ func viewOf(c store.Config) adminConfig {
 		Gateway:       c.Gateway,
 		TLS:           tlsView(c.TLS),
 		SSO:           c.SSO,
+		Headers:       c.Headers,
 		Policy:        c.Policy,
 		SMTP: adminSMTP{
 			Addr:           c.SMTP.Addr,
@@ -934,6 +936,7 @@ func merge(in adminConfig, current store.Config) store.Config {
 		Gateway:       in.Gateway,
 		TLS:           mergeTLS(in.TLS, current.TLS),
 		SSO:           in.SSO,
+		Headers:       in.Headers,
 		Policy:        in.Policy,
 		SMTP: store.SMTP{
 			Addr:               in.SMTP.Addr,
