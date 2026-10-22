@@ -147,6 +147,36 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr 127.0.0.1:8080 \
 需要留意的固有限制：仅按名字拦截时，用户可以用 IP 直连或换一个指向同一站点的域名绕开黑名单。
 要真正封住一个网段，请写 CIDR 规则。
 
+## 附加请求头
+
+管理后台的「附加请求头」让网关转发到特定站点时，在请求里加上指定的 HTTP 头——
+例如访问 `test.corp.com` 时加 `test-env: dev`，让同一套前端访问到测试环境的后端。
+
+每条规则三项：
+
+| 字段 | 说明 |
+| --- | --- |
+| 站点 | 与访问策略的站点清单同一套写法：`test.corp.com`（同时覆盖 `api.test.corp.com` 等子域）、`*.uat.corp.com`；也可以写网段 `10.0.0.0/8`，但只对**直接用 IP 访问**的目标生效（附加头在解析域名之前决定） |
+| Header 名称 | 合法的 HTTP 字段名，如 `test-env`、`X-Env` |
+| 值 | 非空，不能含换行等控制字符；首尾空白会被去掉 |
+
+规则如何生效：
+
+- **覆盖浏览器发来的同名头**。用户无法从浏览器一侧把 `test-env: dev` 改成别的值。
+- 多条规则命中同一个请求时按顺序全部应用；**设置同一个头时排在后面的生效**，所以可以先写一条宽泛的，再在后面写例外。
+- 保存即时生效，无需重启；`-log-headers` 下可以在 `upstream` 段里看到实际发出的值。
+- 对所有经过网关、发往该站点的请求生效，包括页面、接口和 WebSocket 握手。
+
+以下头由网关自己管理，**不能**在这里设置：`Host`、`Cookie`、`Origin`、`Referer`、`Accept-Encoding`、
+`Content-Length`、`Transfer-Encoding`、`X-Forwarded-For`（请用「会话与来源 IP」里的开关）、
+`X-Forwarded-Host`、`X-Forwarded-Proto`，以及 `Connection`、`Upgrade` 等连接级的头。
+
+值以明文保存在配置文件（`webvpn-config.json`，0600）中，并在后台对所有管理员可见。
+可以用来放一个目标站点要求的静态标识，但不要把它当作存放高价值凭据的地方。
+
+接口：随 `GET/POST /admin/api/config` 的 `headers` 字段读写，形如
+`[{"site":"test.corp.com","name":"test-env","value":"dev"}]`。
+
 ## 排查：`-log-headers`
 
 站点在网关下行为异常、又看不出所以然时，用它把**网关发往上游的请求**记下来，和浏览器直连时的

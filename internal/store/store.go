@@ -49,6 +49,9 @@ type Config struct {
 	TLS TLS `json:"tls"`
 	// SSO governs putting real addresses back into outbound requests.
 	SSO SSO `json:"sso"`
+	// Headers are request headers added to what the gateway sends particular
+	// sites.
+	Headers []HeaderRule `json:"headers"`
 	// Policy holds the runtime knobs an operator tunes without a restart.
 	Policy Policy `json:"policy"`
 }
@@ -325,6 +328,8 @@ type Store struct {
 	rules siteRules
 	// sso is the parsed form of SSO.Hosts, read on every proxied request.
 	sso siteRules
+	// headers is the parsed form of Headers, read on every proxied request.
+	headers []headerRule
 }
 
 // LoadStore reads path, falling back to def when the file does not exist yet.
@@ -334,6 +339,7 @@ func LoadStore(path string, def Config) (*Store, error) {
 	defer func() {
 		s.rules, _ = parseSites(s.cfg.Access.Sites)
 		s.sso, _ = parseSites(s.cfg.SSO.Hosts)
+		s.headers = compileHeaderRules(s.cfg.Headers)
 	}()
 	data, err := os.ReadFile(path)
 	switch {
@@ -373,6 +379,7 @@ func normalizeConfig(c Config) Config {
 		c.SSO.Mode = RestoreAll
 	}
 	c.SSO.Hosts = cleanPatterns(c.SSO.Hosts)
+	c.Headers = normalizeHeaderRules(c.Headers)
 
 	if c.Policy.SessionMinutes < 0 {
 		c.Policy.SessionMinutes = 0
@@ -450,6 +457,7 @@ func (c Config) clone() Config {
 	c.Admins = append([]string(nil), c.Admins...)
 	c.Access.Sites = append([]string(nil), c.Access.Sites...)
 	c.SSO.Hosts = append([]string(nil), c.SSO.Hosts...)
+	c.Headers = append([]HeaderRule(nil), c.Headers...)
 	groups := make([]Group, len(c.Bookmarks))
 	copy(groups, c.Bookmarks)
 	for i := range groups {
@@ -500,6 +508,7 @@ func (s *Store) Set(c Config) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.cfg, s.rules, s.sso = c, rules, sso
+	s.headers = compileHeaderRules(c.Headers)
 	return s.save()
 }
 
@@ -524,6 +533,9 @@ func Validate(c Config) error {
 	}
 	if c.SSO.Mode == RestoreHosts && len(c.SSO.Hosts) == 0 {
 		return fmt.Errorf("按域名生效时 SSO 域名清单不能为空")
+	}
+	if err := validateHeaderRules(c.Headers); err != nil {
+		return err
 	}
 	if n := c.Policy.SessionMinutes; n != 0 && (n < MinSessionMinutes || n > MaxSessionMinutes) {
 		return fmt.Errorf("会话有效期需在 %d 到 %d 分钟之间", MinSessionMinutes, MaxSessionMinutes)

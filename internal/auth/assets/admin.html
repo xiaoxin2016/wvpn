@@ -107,6 +107,9 @@
   .row{display:grid; gap:8px; grid-template-columns:1fr; align-items:center}
   @media(min-width:760px){ .row{grid-template-columns:1.1fr 1.7fr 1.1fr auto} }
   .row input{padding:8px 11px; font-size:13.5px}
+  @media(min-width:760px){ .row.hdr{grid-template-columns:1.2fr 1fr 1.6fr auto} }
+  .row-head{display:none; gap:8px; font-size:12px; color:var(--faint); padding:0 2px 6px}
+  @media(min-width:760px){ .row-head{display:grid; grid-template-columns:1.2fr 1fr 1.6fr 30px} }
   .icon{
     flex:none; width:30px; height:30px; border-radius:8px; border:1px solid var(--border);
     background:transparent; color:var(--faint); cursor:pointer; font-size:15px; line-height:1;
@@ -403,6 +406,25 @@
   </section>
 
   <section>
+    <h2>附加请求头</h2>
+    <p class="hint">网关转发到匹配的站点时，在请求里加上这些 HTTP 头，例如给测试环境加 <code>test-env: dev</code>。
+      站点匹配式与访问策略一致：填域名同时覆盖其子域，也可用 <code>*</code> 通配。配置的值<strong>覆盖</strong>浏览器发来的同名头，
+      用户无法从浏览器一侧改写；多条规则设置同一个头时，排在后面的生效。保存即时生效，无需重启。</p>
+
+    <div class="row-head"><span>站点</span><span>Header 名称</span><span>值</span><span></span></div>
+    <div class="rows" id="hdr-rows"></div>
+    <p class="empty" id="no-hdr" hidden>还没有配置附加请求头。</p>
+    <button class="add" id="add-hdr" type="button">+ 添加请求头</button>
+    <p class="sub">Host、Cookie、Origin、Referer、X-Forwarded-For 以及连接级的头由网关自己管理，不能在这里设置。
+      值以明文保存在配置文件中，并对所有管理员可见——不要把它当作存放机密的地方。</p>
+
+    <div class="actions">
+      <button class="primary" id="save-hdr">保存</button>
+      <span class="msg" id="hdr-msg" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <section>
     <h2>门户书签</h2>
     <p class="hint">门户首页展示的分组与链接。地址可省略协议，默认按 https 处理。</p>
     <div id="groups"></div>
@@ -441,12 +463,14 @@
                  tls:{cert:"", key:"", clear:false, key_set:false},
                  access:{mode:"off", sites:[]},
                  sso:{mode:"all", hosts:[]},
+                 headers:[],
                  policy:{session_minutes:0, forward_for:false},
                  bookmarks:[], smtp:{addr:"", from:"", username:"", tls_mode:"auto",
                                      allow_plaintext_auth:false, helo:"",
                                      insecure_skip_verify:false, password:"", clear_password:false,
                                      password_set:false}};
   let cfg = JSON.parse(JSON.stringify(EMPTY));
+  let hdrDraft = [];
 
   const lines = (v) => v.split("\n").map(s => s.trim()).filter(Boolean);
   const fmt = (iso) => { const d = new Date(iso);
@@ -507,6 +531,11 @@
     const ssoRadio = document.querySelector('input[name=ssomode][value="' + cfg.sso.mode + '"]');
     if (ssoRadio) ssoRadio.checked = true;
     renderGroups();
+    cfg.headers = cfg.headers || [];
+    // The editor works on a copy: saving another section sends the rules as
+    // last saved, not rows still being typed.
+    hdrDraft = cfg.headers.map(r => Object.assign({}, r));
+    renderHeaders();
   }
 
   async function loadConfig(){
@@ -761,6 +790,37 @@
       return {name: (g.name||"").trim(), items: (g.items||[]).filter(i => (i.name||"").trim() && (i.url||"").trim())};
     }).filter(g => g.name && g.items.length);
     save($("save-bookmarks"), $("bookmarks-msg"), {bookmarks: groups});
+  });
+
+  // ---- request headers ----------------------------------------------------
+
+  function renderHeaders(){
+    const box = $("hdr-rows");
+    box.innerHTML = "";
+    $("no-hdr").hidden = hdrDraft.length > 0;
+    hdrDraft.forEach(function(rule, i){
+      const row = document.createElement("div");
+      row.className = "row hdr";
+      row.appendChild(field(rule.site, "test.corp.com", v => rule.site = v));
+      row.appendChild(field(rule.name, "test-env", v => rule.name = v));
+      row.appendChild(field(rule.value, "dev", v => rule.value = v));
+      row.appendChild(iconButton("删除", () => { hdrDraft.splice(i, 1); renderHeaders(); }));
+      box.appendChild(row);
+    });
+  }
+
+  $("add-hdr").addEventListener("click", function(){
+    hdrDraft.push({site:"", name:"", value:""});
+    renderHeaders();
+    const inputs = $("hdr-rows").querySelectorAll("input");
+    if (inputs.length) inputs[inputs.length - 3].focus();
+  });
+
+  $("save-hdr").addEventListener("click", function(){
+    // Rows left completely blank are the editor's, not the operator's.
+    const rules = hdrDraft.map(r => ({site:(r.site||"").trim(), name:(r.name||"").trim(), value:(r.value||"").trim()}))
+      .filter(r => r.site || r.name || r.value);
+    save($("save-hdr"), $("hdr-msg"), {headers: rules});
   });
 
   // ---- sessions -----------------------------------------------------------
