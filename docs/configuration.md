@@ -167,9 +167,21 @@ WEBVPN_SMTP_PASS='...' ./webvpn -addr 127.0.0.1:8080 \
 - 保存即时生效，无需重启；`-log-headers` 下可以在 `upstream` 段里看到实际发出的值。
 - 对所有经过网关、发往该站点的请求生效，包括页面、接口和 WebSocket 握手。
 
+`X-Forwarded-For` 可以设置，但它和「会话与来源 IP」里的透传开关有先后：
+
+| 透传开关 | 有 `X-Forwarded-For` 规则 | 目标站点收到的 |
+| --- | --- | --- |
+| 关 | 否 | 不带 `X-Forwarded-For`（也不带前置代理写的 `X-Real-IP`） |
+| 关 | 是 | 规则里配置的值 |
+| 开 | 否 / 是 | 网关判定出的用户真实地址；规则**不生效**，后台会在规则旁提示 |
+
+开关打开意味着「告诉目标站点用户是谁」，一个固定值会悄悄把它变成别的意思，所以真实地址优先。
+典型用法是开关保持关闭，只给要求必须带 XFF（或按它做白名单）的站点配一个固定值。
+
 以下头由网关自己管理，**不能**在这里设置：`Host`、`Cookie`、`Origin`、`Referer`、`Accept-Encoding`、
-`Content-Length`、`Transfer-Encoding`、`X-Forwarded-For`（请用「会话与来源 IP」里的开关）、
-`X-Forwarded-Host`、`X-Forwarded-Proto`，以及 `Connection`、`Upgrade` 等连接级的头。
+`Content-Length`、`Transfer-Encoding`、`X-Forwarded-Host`、`X-Forwarded-Proto`，以及 `Connection`、
+`Upgrade` 等连接级的头。`X-Forwarded-Host`/`-Proto` 不开放，是因为站点会据此拼出自己的地址，
+而网关是按目标真实的协议与主机把这些地址改写回网关的——拼错了，改写就会指向另一个目标。
 
 值以明文保存在配置文件（`webvpn-config.json`，0600）中，并在后台对所有管理员可见。
 可以用来放一个目标站点要求的静态标识，但不要把它当作存放高价值凭据的地方。
@@ -233,7 +245,9 @@ origin 200 http://eiop.corp.com/uopsLogin/uopsLogin.do
 ### 来源 IP
 
 默认**不向目标站点传递** `X-Forwarded-For`：网关的作用之一就是让目标站点看不到背后是谁，
-内网地址也不宜随手外泄。目标站点需要按真实来源记录日志或做访问控制时再打开。
+内网地址也不宜随手外泄。关闭时，前置代理（如 nginx 的 `proxy_set_header X-Real-IP`）写给网关的
+`X-Real-IP` 也一并去掉，不再原样转给目标站点。某个站点必须带一个固定的 `X-Forwarded-For` 时，
+在[附加请求头](#附加请求头)里单独配置。目标站点需要按真实来源记录日志或做访问控制时再打开。
 
 打开后传的是**网关判定出的那一个地址**（即后台活动会话里显示的那个，已按 `-trust-proxy-headers`
 规则处理过前置代理），不是浏览器带来的整条链——那条链是客户端想写什么就是什么。

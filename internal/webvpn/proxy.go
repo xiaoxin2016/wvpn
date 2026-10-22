@@ -76,7 +76,8 @@ type Options struct {
 	// ExtraHeaders returns request headers to add for a target, in order; a
 	// later one with the same name wins. The caller vouches for them: names
 	// the gateway manages itself (Host, Cookie, hop-by-hop headers) and values
-	// carrying line breaks must already have been refused. Nil adds nothing.
+	// carrying line breaks must already have been refused. An X-Forwarded-For
+	// among them applies only while ForwardFor is off. Nil adds nothing.
 	ExtraHeaders func(target *url.URL) []Header
 
 	// SessionCookie names the gateway's own session cookie, which must never
@@ -639,17 +640,30 @@ func (h *Handler) rewriteRequest(pr *httputil.ProxyRequest) {
 	// Who is behind the gateway is the operator's call. What is forwarded is the
 	// address the gateway itself settled on, not the chain the browser arrived
 	// with — that chain is whatever a client cared to claim.
+	//
+	// Withheld means withheld: X-Real-IP, which a proxy in front of the gateway
+	// writes for the gateway's own benefit, names the same browser and goes
+	// too.
 	if info.clientIP != "" {
 		pr.Out.Header.Set("X-Forwarded-For", info.clientIP)
 	} else {
 		pr.Out.Header.Del("X-Forwarded-For")
+		pr.Out.Header.Del("X-Real-Ip")
 	}
 
 	// Headers the operator attached to this site come last, and replace what
 	// the browser sent under the same name: a header set on the way in is not
 	// one a user can override from the other side.
+	//
+	// The one exception is X-Forwarded-For while the gateway is passing the
+	// browser's address on: that switch says the site is to be told who is
+	// behind the gateway, and a fixed value would quietly tell it something
+	// else. With the switch off the header is free for the operator to set.
 	if h.opts.ExtraHeaders != nil {
 		for _, hd := range h.opts.ExtraHeaders(target) {
+			if info.clientIP != "" && http.CanonicalHeaderKey(hd.Name) == "X-Forwarded-For" {
+				continue
+			}
 			pr.Out.Header.Set(hd.Name, hd.Value)
 		}
 	}

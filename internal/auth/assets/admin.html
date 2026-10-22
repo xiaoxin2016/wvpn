@@ -108,6 +108,7 @@
   @media(min-width:760px){ .row{grid-template-columns:1.1fr 1.7fr 1.1fr auto} }
   .row input{padding:8px 11px; font-size:13.5px}
   @media(min-width:760px){ .row.hdr{grid-template-columns:1.2fr 1fr 1.6fr auto} }
+  #hdr-xff{margin:10px 0 0}
   .row-head{display:none; gap:8px; font-size:12px; color:var(--faint); padding:0 2px 6px}
   @media(min-width:760px){ .row-head{display:grid; grid-template-columns:1.2fr 1fr 1.6fr 30px} }
   .icon{
@@ -369,6 +370,7 @@
           <input type="checkbox" id="forward-for"><span>向目标站点传递 <code>X-Forwarded-For</code></span>
         </label>
         <p class="sub">默认不传：网关的作用之一就是让目标站点看不到背后是谁，内网地址也不宜随手外泄。
+          关闭时前置代理写入的 <code>X-Real-IP</code> 也一并去掉；某个站点需要固定值时，可在「附加请求头」里单独配置。
           目标站点需要按真实来源记录日志或做访问控制时再打开。传的是网关判定出的那一个地址，
           不是浏览器带来的整条链——那条链是客户端想写什么就是什么。</p>
       </div>
@@ -414,8 +416,10 @@
     <div class="row-head"><span>站点</span><span>Header 名称</span><span>值</span><span></span></div>
     <div class="rows" id="hdr-rows"></div>
     <p class="empty" id="no-hdr" hidden>还没有配置附加请求头。</p>
+    <p class="notice" id="hdr-xff" hidden></p>
     <button class="add" id="add-hdr" type="button">+ 添加请求头</button>
-    <p class="sub">Host、Cookie、Origin、Referer、X-Forwarded-For 以及连接级的头由网关自己管理，不能在这里设置。
+    <p class="sub">Host、Cookie、Origin、Referer、X-Forwarded-Host、X-Forwarded-Proto 以及连接级的头由网关自己管理，不能在这里设置。
+      X-Forwarded-For 可以设置，但只在「会话与来源 IP」的透传<strong>关闭</strong>时生效；透传开启时以用户的真实地址为准。
       值以明文保存在配置文件中，并对所有管理员可见——不要把它当作存放机密的地方。</p>
 
     <div class="actions">
@@ -802,11 +806,28 @@
       const row = document.createElement("div");
       row.className = "row hdr";
       row.appendChild(field(rule.site, "test.corp.com", v => rule.site = v));
-      row.appendChild(field(rule.name, "test-env", v => rule.name = v));
+      row.appendChild(field(rule.name, "test-env", v => { rule.name = v; updateXffNotice(); }));
       row.appendChild(field(rule.value, "dev", v => rule.value = v));
       row.appendChild(iconButton("删除", () => { hdrDraft.splice(i, 1); renderHeaders(); }));
       box.appendChild(row);
     });
+    updateXffNotice();
+  }
+
+  // While the gateway passes the browser's address on, a configured
+  // X-Forwarded-For is set aside in favour of the real one. Say so next to the
+  // rule rather than let it look as if it applied.
+  function updateXffNotice(){
+    const rows = [];
+    hdrDraft.forEach((r, i) => { if ((r.name || "").trim().toLowerCase() === "x-forwarded-for") rows.push(i + 1); });
+    const box = $("hdr-xff");
+    if (rows.length && cfg.policy.forward_for) {
+      box.textContent = "「会话与来源 IP」已开启 X-Forwarded-For 透传：第 " + rows.join("、") +
+        " 条规则中的 X-Forwarded-For 不生效，目标站点收到的是用户的真实地址。关闭透传后这条规则才会生效。";
+      box.hidden = false;
+    } else {
+      box.hidden = true;
+    }
   }
 
   $("add-hdr").addEventListener("click", function(){
