@@ -55,12 +55,6 @@ TLS 建议交给前置 nginx，网关自己监听明文回环地址：
 ### 3. 前置 nginx
 
 ```nginx
-# 放在 http {} 里：有 Upgrade 才转成 upgrade，普通请求不带
-map $http_upgrade $connection_upgrade {
-    default upgrade;
-    ''      close;
-}
-
 server {
     listen 443 ssl;
     server_name app.intra.corp.com *.intra.corp.com;   # 子域名模式需要泛域名证书
@@ -75,14 +69,14 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;      # 决定网关写出的地址用 http 还是 https
         proxy_http_version 1.1;                            # WebSocket（nginx 1.29.7 之前默认是 1.0）
         proxy_set_header Upgrade           $http_upgrade;
-        proxy_set_header Connection        $connection_upgrade;
+        proxy_set_header Connection        "upgrade";
         proxy_read_timeout 3600s;                          # 默认 60 秒无数据即断开 WebSocket
         proxy_buffering off;                               # SSE
     }
 }
 ```
 
-WebSocket 需要顶部的 `map` 与 `proxy_http_version` 到 `proxy_read_timeout` 这四行，细节见
+WebSocket 需要 `proxy_http_version` 到 `proxy_read_timeout` 这四行，细节见
 [站点兼容性 → WebSocket](docs/compatibility.md#websocket)。另外三个头都别漏：`Host` 决定子域名模式能否解出目标，`X-Forwarded-Proto` 决定写出的地址用什么协议
 （漏了会出现混合内容与跨源预检，也可在后台「对外协议」里强制 HTTPS），`X-Real-IP` 决定会话列表
 里看到的是真实来源还是 `127.0.0.1`。

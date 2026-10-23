@@ -270,11 +270,32 @@ HTML 属性不受影响——那里由浏览器按文档解析，根相对形式
 **前置 nginx 需要的配置**（README 的示例已包含）：
 
 ```nginx
-proxy_http_version 1.1;                       # nginx 1.29.7 之前默认 1.0
+proxy_http_version 1.1;                 # nginx 1.29.7 之前默认 1.0
 proxy_set_header Upgrade    $http_upgrade;
-proxy_set_header Connection $connection_upgrade;   # 配合 http {} 里的 map
-proxy_read_timeout 3600s;                     # 默认 60 秒没有数据就断开
+proxy_set_header Connection "upgrade";
+proxy_read_timeout 3600s;               # 默认 60 秒没有数据就断开
 ```
+
+`Connection` 写死为 `"upgrade"` 就够用，普通请求也照常工作。想让普通请求不带这个值，可以换成 nginx
+文档里的 `map` 写法——注意 `map` **只能放在 `http {}` 里**（`conf.d/*.conf`、`sites-enabled/*`
+这类被 `http {}` 包含的文件顶层也行），不能放进 `server {}` 或 `location {}`：
+
+```nginx
+# http {} 里
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+# location {} 里
+proxy_set_header Connection $connection_upgrade;
+```
+
+两种常见的放错方式，`nginx -t` 的报错分别是：
+
+| 报错 | 原因 |
+| --- | --- |
+| `unknown "connection_upgrade" variable` | 只加了 `proxy_set_header Connection $connection_upgrade;`，没有加 `map` |
+| `"map" directive is not allowed here` | `map` 放进了 `server {}` 或 `location {}` |
 
 依据 nginx 官方文档 *WebSocket proxying* 与 `proxy_http_version` 指令说明（1.29.7 起默认 1.1，此前为 1.0）。`Upgrade` 与
 `Connection` 是逐跳头，不显式设置就不会转给网关；`proxy_read_timeout` 默认 60 秒，应用如果不发
