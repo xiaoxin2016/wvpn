@@ -61,7 +61,13 @@
   }
 
   function pathForm(u) {
-    return PREFIX + u.protocol.slice(0, -1) + "/" + u.host + u.pathname + u.search + u.hash;
+    // A WebSocket handshake is an HTTP request to the site, so it is addressed
+    // as the site: under the same path the site's cookies are scoped to, which
+    // is what lets the browser send them with it.
+    var scheme = u.protocol.slice(0, -1);
+    if (scheme === "ws") scheme = "http";
+    if (scheme === "wss") scheme = "https";
+    return PREFIX + scheme + "/" + u.host + u.pathname + u.search + u.hash;
   }
 
   function encode(u) {
@@ -148,11 +154,31 @@
   // wsRewrite keeps websocket URLs on the gateway's own scheme.
   function wsRewrite(ref) {
     var out = rewrite(ref);
+    if (typeof out !== "string") return out;
     // The path form is relative to this origin; a websocket needs an absolute
     // ws(s) URL. The sub-domain form is already absolute.
-    if (typeof out !== "string" || out.indexOf(PREFIX) !== 0) return out;
-    var scheme = location.protocol === "https:" ? "wss:" : "ws:";
-    return scheme + "//" + location.host + out;
+    if (out.indexOf(PREFIX) === 0) {
+      var scheme = location.protocol === "https:" ? "wss:" : "ws:";
+      return scheme + "//" + location.host + out;
+    }
+    // A site served over plain http may well write "ws://" + location.host.
+    // Behind a gateway that browsers reach over https, the same line names the
+    // gateway with ws://, and an https page is not allowed to open that: the
+    // browser refuses before anything is sent. The gateway answers wss on its
+    // own hosts wherever it answers https — which scheme the site itself is
+    // reached with is carried in the address, not in this — so the address is
+    // moved onto wss.
+    if (location.protocol === "https:") {
+      try {
+        var u = new URL(out, location.href);
+        if (u.protocol === "ws:" && isGatewayHost(u.host)) {
+          u.protocol = "wss:";
+          if (u.port === "80") u.port = "";
+          return u.href;
+        }
+      } catch (e) {}
+    }
+    return out;
   }
 
   // absolute resolves a gateway-relative reference back to the target URL, used

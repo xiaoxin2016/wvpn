@@ -115,8 +115,9 @@ func (t *trustStore) trusted(host, fp string) bool {
 }
 
 // dialTLS replaces the transport's own TLS dialer so that a verification
-// failure can be turned into a question instead of an error.
-func (h *Handler) dialTLS(dialer *net.Dialer) func(ctx context.Context, network, addr string) (net.Conn, error) {
+// failure can be turned into a question instead of an error. protos is what is
+// offered in ALPN, which decides whether the connection may become HTTP/2.
+func (h *Handler) dialTLS(dialer *net.Dialer, protos ...string) func(ctx context.Context, network, addr string) (net.Conn, error) {
 	return func(ctx context.Context, network, addr string) (net.Conn, error) {
 		raw, err := dialer.DialContext(ctx, network, addr)
 		if err != nil {
@@ -133,7 +134,7 @@ func (h *Handler) dialTLS(dialer *net.Dialer) func(ctx context.Context, network,
 			// Verification happens below, by hand, so that a failure can carry
 			// the certificate along with it.
 			InsecureSkipVerify: true,
-			NextProtos:         []string{"h2", "http/1.1"},
+			NextProtos:         protos,
 		}
 		conn := tls.Client(raw, cfg)
 		if err := conn.HandshakeContext(ctx); err != nil {

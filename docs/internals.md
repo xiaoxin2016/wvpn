@@ -12,7 +12,7 @@ internal/webvpn/codec.go    三种 URL 编解码（plain / wrd / subdomain）
 internal/webvpn/rewrite.go  HTML / CSS 改写（基于 x/net/html tokenizer，未改动的 token 原样透传）
 internal/webvpn/proxy.go    ReverseProxy 装配、请求/响应改写、Cookie 重定域
 internal/webvpn/guard.go    目标策略：启动参数硬边界 + 后台站点清单 + 反 DNS 重绑定
-internal/webvpn/tls.go      自定义 TLS 拨号：证书验证失败转为询问，确认后按指纹固定信任
+internal/webvpn/tls.go      自定义 TLS 拨号：证书验证失败转为询问，确认后按指纹固定信任；可限定 ALPN（WebSocket 握手只用 HTTP/1.1）
 internal/webvpn/restore.go  请求参数中的网关地址还原为真实地址（SSO 回跳）
 internal/webvpn/pages.go    每个浏览器的访问轨迹，用于判定裸网关地址代表哪个站点
 internal/webvpn/cookie.go   Cookie 按原始字节改写（不经 Go 的 cookie 解析/序列化）
@@ -57,6 +57,7 @@ SMTP 配置（校验、密码不回显、留空沿用、显式清除、测试邮
 自签名证书流程（询问页、指纹固定、伪造确认被拒、子资源不渲染询问页、返回地址校验）、
 Cookie 原始字节保全（非 ASCII / 空格 / 逗号 / 引号值）、域级 Cookie 的服务端回放与会话隔离、
 `credentials: "omit"` 请求（凭网关会话放行、不向源站转发 Cookie、不保存响应 Cookie、标记头不外泄）、
+WebSocket（握手带站点 Origin 与 Cookie、`ws://` 地址按站点处理、上游启用 HTTP/2 时握手仍走 HTTP/1.1）、
 脚本内绝对地址改写（同域命中、他域不动、JSON 转义斜杠、端口、内联脚本不被破坏）、
 网关地址配置（模式校验、子域名模式必填泛域名、门户主机须在泛域名内、门户不进目标空间、
 端口编码进标签并可往返、超长标签回退路径形式、运行期切换模式即时生效、身份路由只属于门户主机）、
