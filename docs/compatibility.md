@@ -244,6 +244,72 @@ HTML 属性不受影响——那里由浏览器按文档解析，根相对形式
 仍然无解的情形：非 Chromium 浏览器 + 地址在运行时拼接（脚本里没有可改写的字面量）。
 这种站点请用[子域名模式](url-modes.md)——注入脚本知道网关域名，运行期拼出的地址也会走子域形式。
 
+## WebSocket
+
+`ws://` 与 `wss://` 都经网关代理，三种 URL 模式都可用。页面里常见的几种写法都会被接住：
+
+| 页面里的写法 | 经网关后 |
+| --- | --- |
+| `(location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws"` | 原样可用 |
+| `"ws://" + location.host + "/ws"`（站点本身是 http，写死了 ws） | 注入脚本改为 `wss://`——https 页面不允许打开 `ws://`，浏览器会在发出前直接拦下 |
+| `"ws://real.corp.com/ws"`（写死完整地址） | 改写到该站点在网关下的地址 |
+| `"/ws"`（相对地址） | 按当前站点解析 |
+
+握手到达源站时与直接访问一致：
+
+- **`Origin` 是站点自身**（`http://real.corp.com` / `https://real.corp.com`），校验 Origin 的服务端
+  （如 Spring 的 `allowedOrigins`、socket.io 的 `cors.origin`）不需要为网关放行；
+- **带上站点自己的 Cookie**（如 `JSESSIONID`），靠 Cookie 鉴权的 WebSocket 照常工作；
+- 「附加请求头」同样作用于握手请求。
+
+**上游启用了 HTTP/2 的 https 站点。** WebSocket 握手依赖 HTTP/1.1 的 `Upgrade`，HTTP/2 没有这个机制。
+网关连 https 上游时会协商 HTTP/2，页面与接口照常走 HTTP/2，但握手一律另开 HTTP/1.1 连接发出——否则
+前面挂着 `listen 443 ssl http2` 的系统会在握手时得到 502
+（日志里是 `http2: invalid Upgrade request header`）。
+
+**前置 nginx 需要的配置**（README 的示例已包含）：
+
+```nginx
+proxy_http_version 1.1;                 # nginx 1.29.7 之前默认 1.0
+proxy_set_header Upgrade    $http_upgrade;
+proxy_set_header Connection "upgrade";
+proxy_read_timeout 3600s;               # 默认 60 秒没有数据就断开
+```
+
+`Connection` 写死为 `"upgrade"` 就够用，普通请求也照常工作。想让普通请求不带这个值，可以换成 nginx
+文档里的 `map` 写法——注意 `map` **只能放在 `http {}` 里**（`conf.d/*.conf`、`sites-enabled/*`
+这类被 `http {}` 包含的文件顶层也行），不能放进 `server {}` 或 `location {}`：
+
+```nginx
+# http {} 里
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+# location {} 里
+proxy_set_header Connection $connection_upgrade;
+```
+
+两种常见的放错方式，`nginx -t` 的报错分别是：
+
+| 报错 | 原因 |
+| --- | --- |
+| `unknown "connection_upgrade" variable` | 只加了 `proxy_set_header Connection $connection_upgrade;`，没有加 `map` |
+| `"map" directive is not allowed here` | `map` 放进了 `server {}` 或 `location {}` |
+
+依据 nginx 官方文档 *WebSocket proxying* 与 `proxy_http_version` 指令说明（1.29.7 起默认 1.1，此前为 1.0）。`Upgrade` 与
+`Connection` 是逐跳头，不显式设置就不会转给网关；`proxy_read_timeout` 默认 60 秒，应用如果不发
+心跳，空闲一分钟连接就会被 nginx 断开。网关自身对已建立的 WebSocket 不设空闲超时。
+
+已知限制：
+
+- **会话只在握手时校验。** 连接建立后，网关会话到期或在后台被注销，**已经打开的 WebSocket 不会被
+  断开**，直到任一端关闭它；新的连接会被拒绝。
+- **WRD（加密路径）模式下握手不带站点 Cookie。** 该模式下站点 Cookie 的路径是加密前缀
+  `/http/<密文>/`，而注入脚本改写出的地址是明文形式 `/p/http/<主机>/`，路径对不上。这不是
+  WebSocket 独有的问题：注入脚本改写的根路径请求（如 `fetch("/api/x")`）同样如此。需要 Cookie 鉴权
+  的系统请用子域名模式或明文路径模式。
+
 ## 自签名证书
 
 内网站点用自签名或私有 CA 签发的证书是常态，直接拒绝会让网关没法用；而 `-insecure-tls`

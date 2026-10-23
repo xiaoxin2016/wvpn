@@ -67,14 +67,17 @@ server {
         proxy_set_header Host              $host;        # 子域名模式必须保留原始 Host
         proxy_set_header X-Real-IP         $remote_addr;
         proxy_set_header X-Forwarded-Proto $scheme;      # 决定网关写出的地址用 http 还是 https
-        proxy_set_header Upgrade           $http_upgrade;  # WebSocket
+        proxy_http_version 1.1;                            # WebSocket（nginx 1.29.7 之前默认是 1.0）
+        proxy_set_header Upgrade           $http_upgrade;
         proxy_set_header Connection        "upgrade";
+        proxy_read_timeout 3600s;                          # 默认 60 秒无数据即断开 WebSocket
         proxy_buffering off;                               # SSE
     }
 }
 ```
 
-三个头都别漏：`Host` 决定子域名模式能否解出目标，`X-Forwarded-Proto` 决定写出的地址用什么协议
+WebSocket 需要 `proxy_http_version` 到 `proxy_read_timeout` 这四行，细节见
+[站点兼容性 → WebSocket](docs/compatibility.md#websocket)。另外三个头都别漏：`Host` 决定子域名模式能否解出目标，`X-Forwarded-Proto` 决定写出的地址用什么协议
 （漏了会出现混合内容与跨源预检，也可在后台「对外协议」里强制 HTTPS），`X-Real-IP` 决定会话列表
 里看到的是真实来源还是 `127.0.0.1`。
 
@@ -108,7 +111,7 @@ server {
 | --- | --- |
 | [配置](docs/configuration.md) | 命令行参数、初始化、邮件发送、访问策略、附加请求头、登录与权限 |
 | [URL 模式](docs/url-modes.md) | 路径 / 加密路径 / 子域名三种形态，泛域名与前置代理 |
-| [站点兼容性](docs/compatibility.md) | Cookie 与单点登录、不带 Cookie 的接口请求、回跳地址还原、运行期改写、自签名证书 |
+| [站点兼容性](docs/compatibility.md) | Cookie 与单点登录、不带 Cookie 的接口请求、回跳地址还原、运行期改写、WebSocket、自签名证书 |
 | [安全须知](docs/security.md) | 部署前请读完 |
 | [实现与开发](docs/internals.md) | 代码结构、构建发布、测试 |
 

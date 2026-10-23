@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,6 +89,21 @@ type Options struct {
 	Portal Portal
 
 	Logger *log.Logger
+}
+
+// upgradeAware sends protocol upgrades — WebSocket handshakes — over HTTP/1.1
+// and everything else over the transport that may speak HTTP/2.
+type upgradeAware struct {
+	normal, upgrade http.RoundTripper
+}
+
+func (t upgradeAware) RoundTrip(r *http.Request) (*http.Response, error) {
+	// ReverseProxy strips hop-by-hop headers and then puts Upgrade back on the
+	// requests it is going to upgrade, so its presence is the signal.
+	if r.Header.Get("Upgrade") != "" {
+		return t.upgrade.RoundTrip(r)
+	}
+	return t.normal.RoundTrip(r)
 }
 
 // Header is one request header to send a site.
@@ -211,7 +227,7 @@ func New(opts Options) *Handler {
 		DialContext: dialer.DialContext,
 		// TLS is dialed by hand so an unverifiable certificate becomes a
 		// question for the user instead of a dead end.
-		DialTLSContext:        h.dialTLS(dialer),
+		DialTLSContext:        h.dialTLS(dialer, "h2", "http/1.1"),
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
@@ -222,8 +238,26 @@ func New(opts Options) *Handler {
 		DisableCompression: true,
 	}
 
+	// A WebSocket handshake is an HTTP/1.1 Upgrade, and HTTP/2 has no such
+	// thing: Go's HTTP/2 client refuses the request outright. Because TLS is
+	// dialed by hand, the transport above cannot be told to leave h2 out for
+	// one request — whatever the server agreed to in ALPN is what the pooled
+	// connection speaks — so upgrades get a transport of their own that never
+	// offers h2. Plain HTTP never negotiates h2, but goes the same way for one
+	// rule instead of two.
+	upgrades := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           dialer.DialContext,
+		DialTLSContext:        h.dialTLS(dialer, "http/1.1"),
+		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
+		MaxIdleConns:          10,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: opts.ResponseHeaderTimeout,
+		DisableCompression:    true,
+	}
+
 	h.rp = &httputil.ReverseProxy{
-		Transport:      transport,
+		Transport:      upgradeAware{normal: transport, upgrade: upgrades},
 		Rewrite:        h.rewriteRequest,
 		ModifyResponse: h.modifyResponse,
 		ErrorHandler:   h.handleError,
@@ -499,6 +533,11 @@ func (h *Handler) serveProxy(w http.ResponseWriter, r *http.Request, codec Codec
 		http.Error(w, "无法解析目标地址", http.StatusBadRequest)
 		return
 	}
+	// A ws:// or wss:// address names the same site as http:// or https://:
+	// the handshake is an HTTP request to it. Everything measured against the
+	// target — the Origin the site is shown, the Cookie Jar, which only knows
+	// http and https — has to see the site, not a scheme no browser sends.
+	target.Scheme = httpScheme(target.Scheme)
 	// A page that folded the gateway into an address of its own is sent to the
 	// address it meant, so that what it reads back about where it is — and
 	// every relative reference measured from there — is the site's own.
